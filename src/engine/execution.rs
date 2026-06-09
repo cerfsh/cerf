@@ -634,30 +634,50 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
             return (ExecutionResult::Exit, 0);
         }
 
-        let resolved = find_executable(name).unwrap_or_else(|| expand_home(name));
+        let is_builtin = builtins::registry::find_command(name).is_some();
+        let resolved = if is_builtin {
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf"))
+        } else {
+            find_executable(name).unwrap_or_else(|| expand_home(name))
+        };
 
-        // Expand globs on the argument list.
+        // Expand globs on the argument list (only used for non-builtins).
         let args = expand_globs(cmd.args());
 
         #[cfg(windows)]
         let mut command = {
-            let is_batch = resolved.extension().is_some_and(|e| {
-                let e = e.to_string_lossy().to_lowercase();
-                e == "cmd" || e == "bat"
-            });
-            if is_batch {
-                let mut c = Command::new("cmd");
-                c.arg("/c").arg(&resolved);
+            if is_builtin {
+                let mut c = Command::new(&resolved);
+                c.arg("-c").arg(crate::engine::job_control::format_node_full(cmd));
                 c
             } else {
-                Command::new(&resolved)
+                let is_batch = resolved.extension().is_some_and(|e| {
+                    let e = e.to_string_lossy().to_lowercase();
+                    e == "cmd" || e == "bat"
+                });
+                let mut c = if is_batch {
+                    let mut c = Command::new("cmd");
+                    c.arg("/c").arg(&resolved);
+                    c
+                } else {
+                    Command::new(&resolved)
+                };
+                c.args(&args);
+                c
             }
         };
 
         #[cfg(unix)]
-        let mut command = Command::new(&resolved);
+        let mut command = {
+            let mut c = Command::new(&resolved);
+            if is_builtin {
+                c.arg("-c").arg(crate::engine::job_control::format_node_full(cmd));
+            } else {
+                c.args(&args);
+            }
+            c
+        };
 
-        command.args(&args);
         command.envs(cmd.assignments().iter().map(|(k, v)| (k, v)));
 
         // Stdin: first command may have < redirect, others get previous pipe
