@@ -4,7 +4,7 @@ mod parser;
 mod signals;
 
 use engine::ShellState;
-use rustyline::DefaultEditor;
+use rustyline::{Editor, history::DefaultHistory};
 use rustyline::ExternalPrinter;
 use rustyline::error::ReadlineError;
 use std::env;
@@ -12,28 +12,6 @@ use std::sync::atomic::AtomicUsize;
 
 pub static FG_JOB: AtomicUsize = AtomicUsize::new(0);
 
-fn get_prompt() -> String {
-    let cwd = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let home = dirs::home_dir();
-
-    let path_str = if let Some(home) = home {
-        if cwd.starts_with(&home) {
-            let relative = cwd.strip_prefix(&home).unwrap();
-            if relative.as_os_str().is_empty() {
-                "~".to_string()
-            } else {
-                let sep = std::path::MAIN_SEPARATOR;
-                format!("~{}{}", sep, relative.display())
-            }
-        } else {
-            cwd.display().to_string()
-        }
-    } else {
-        cwd.display().to_string()
-    };
-
-    format!("cf {} > ", path_str)
-}
 
 fn main() -> rustyline::Result<()> {
     signals::init();
@@ -65,7 +43,7 @@ fn main() -> rustyline::Result<()> {
         return Ok(());
     }
     else if args.len() == 2 && args[1] == "--version" {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        println!("v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -73,7 +51,7 @@ fn main() -> rustyline::Result<()> {
     source_profile(&mut state);
 
     let config = rustyline::Config::builder().bracketed_paste(true).build();
-    let mut rl = DefaultEditor::with_config(config)?;
+    let mut rl = Editor::<(), DefaultHistory>::with_config(config)?;
     let mut printer_opt = rl.create_external_printer().ok();
 
     #[cfg(windows)]
@@ -141,7 +119,9 @@ fn main() -> rustyline::Result<()> {
         engine::job_control::restore_terminal(&state);
 
         let prompt = if input_buffer.is_empty() {
-            get_prompt()
+            state
+                .get_var_string("PS1")
+                .unwrap_or_else(|| "\\u@\\h:\\w\\$ ".to_string())
         } else {
             state
                 .get_var_string("PS2")
