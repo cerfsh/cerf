@@ -119,13 +119,13 @@ fn main() -> rustyline::Result<()> {
         engine::job_control::restore_terminal(&state);
 
         let prompt = if input_buffer.is_empty() {
-            state
+            expand_prompt(&state
                 .get_var_string("PS1")
-                .unwrap_or_else(|| "\\u@\\h:\\w\\$ ".to_string())
+                .unwrap_or_else(|| "\\u@\\h:\\w\\$ ".to_string()))
         } else {
-            state
+            expand_prompt(&state
                 .get_var_string("PS2")
-                .unwrap_or_else(|| "> ".to_string())
+                .unwrap_or_else(|| "> ".to_string()))
         };
 
         let readline = rl.readline(&prompt);
@@ -199,4 +199,45 @@ fn source_profile(state: &mut ShellState) {
             builtins::source::run(&[path_str], state);
         }
     }
+}
+
+fn expand_prompt(prompt: &str) -> String {
+    let mut result = prompt.to_string();
+    
+    if result.contains("\\u") {
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".to_string());
+        result = result.replace("\\u", &user);
+    }
+    
+    if result.contains("\\h") {
+        let host = sysinfo::System::host_name().unwrap_or_else(|| "localhost".to_string());
+        let short_host = host.split('.').next().unwrap_or("localhost");
+        result = result.replace("\\h", short_host);
+    }
+    
+    if result.contains("\\w") {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut cwd_str = cwd.display().to_string();
+        if let Some(home) = dirs::home_dir() {
+            if cwd.starts_with(&home) {
+                if let Ok(relative) = cwd.strip_prefix(&home) {
+                    cwd_str = if relative.as_os_str().is_empty() {
+                        "~".to_string()
+                    } else {
+                        format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display())
+                    };
+                }
+            }
+        }
+        result = result.replace("\\w", &cwd_str);
+    }
+    
+    if result.contains("\\$") {
+        let is_root = std::env::var("UID").unwrap_or_default() == "0";
+        result = result.replace("\\$", if is_root { "#" } else { "$" });
+    }
+    
+    result
 }
