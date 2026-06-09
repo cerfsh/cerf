@@ -1,11 +1,10 @@
 mod builtins;
 mod engine;
 mod parser;
-mod prompt;
 mod signals;
 
 use engine::ShellState;
-use rustyline::DefaultEditor;
+use rustyline::{Editor, history::DefaultHistory};
 use rustyline::ExternalPrinter;
 use rustyline::error::ReadlineError;
 use std::env;
@@ -44,7 +43,7 @@ fn main() -> rustyline::Result<()> {
         return Ok(());
     }
     else if args.len() == 2 && args[1] == "--version" {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        println!("v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -52,7 +51,7 @@ fn main() -> rustyline::Result<()> {
     source_profile(&mut state);
 
     let config = rustyline::Config::builder().bracketed_paste(true).build();
-    let mut rl = DefaultEditor::with_config(config)?;
+    let mut rl = Editor::<(), DefaultHistory>::with_config(config)?;
     let mut printer_opt = rl.create_external_printer().ok();
 
     #[cfg(windows)]
@@ -120,7 +119,9 @@ fn main() -> rustyline::Result<()> {
         engine::job_control::restore_terminal(&state);
 
         let prompt = if input_buffer.is_empty() {
-            prompt::build_prompt(&mut state)
+            state
+                .get_var_string("PS1")
+                .unwrap_or_else(|| "\\u@\\h:\\w\\$ ".to_string())
         } else {
             state
                 .get_var_string("PS2")
