@@ -297,7 +297,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         let result = command.spawn();
 
         let code = match result {
-            Ok(mut child) => {
+            Ok(child) => {
                 let pid = child.id();
 
                 #[cfg(unix)]
@@ -484,6 +484,8 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                         ExecutionResult::KeepRunning => {
                             final_code = code;
                         }
+                        ExecutionResult::Success => todo!(),
+                        ExecutionResult::Failure => todo!(),
                     }
                 }
                 let code = if pipeline.negated {
@@ -519,6 +521,8 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                         ExecutionResult::KeepRunning => {
                             final_code = body_code;
                         }
+                        ExecutionResult::Success => todo!(),
+                        ExecutionResult::Failure => todo!(),
                     }
                 }
                 let code = if pipeline.negated {
@@ -543,6 +547,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                         ExecutionResult::KeepRunning => {
                             final_code = body_code;
                         }
+                        ExecutionResult::Success | ExecutionResult::Failure => todo!()
                     }
                 }
                 return (ExecutionResult::KeepRunning, final_code);

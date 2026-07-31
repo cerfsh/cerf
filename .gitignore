@@ -5,3 +5,4 @@
 .p/
 p.*.toml
 !p.toml
+.aider*

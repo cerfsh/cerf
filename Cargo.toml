@@ -20,6 +20,8 @@ rustyline = "17.0.2"
 sysinfo = "0.38"
 jwalk = "0.8.1"
 chrono = "0.4.39"
+reqwest = { version = "0.13", features = ["blocking", "json"] }
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3"

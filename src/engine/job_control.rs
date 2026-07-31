@@ -45,7 +45,7 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
             None => break,
         };
 
-        let pgid = job.pgid;
+        let _pgid = job.pgid;
 
         if job.is_stopped() {
             if fg {

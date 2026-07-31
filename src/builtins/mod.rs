@@ -32,3 +32,4 @@ pub mod umask;
 pub mod unalias;
 pub mod unset;
 pub mod wait;
+pub mod net;
