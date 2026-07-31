@@ -297,7 +297,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         let result = command.spawn();
 
         let code = match result {
-            Ok(child) => {
+            Ok(mut child) => {
                 let pid = child.id();
 
                 #[cfg(unix)]

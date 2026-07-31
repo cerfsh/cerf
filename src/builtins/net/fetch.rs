@@ -16,7 +16,7 @@ pub const COMMAND_INFO: crate::builtins::registry::CommandInfo = crate::builtins
 static HTTP_CLIENT: LazyLock<Result<Client, reqwest::Error>> = LazyLock::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("ShellEngine/1.0")
+        .user_agent("CerfSh/1.0")
         .build()
 });
 

@@ -48,7 +48,7 @@ fn set_tether(args: &[String], state: &mut ShellState, tether: bool) -> i32 {
     for arg in args {
         match crate::engine::job_control::resolve_job_specifier(arg, state) {
             Ok(id) => {
-                if let Some(_job) = state.jobs.get(&id) {
+                if let Some(job) = state.jobs.get(&id) {
                     #[cfg(windows)]
                     {
                         unsafe {

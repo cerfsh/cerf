@@ -51,7 +51,7 @@ fn main() -> rustyline::Result<()> {
 
     let config = rustyline::Config::builder().bracketed_paste(true).build();
     let mut rl = Editor::<(), DefaultHistory>::with_config(config)?;
-    let _printer_opt = rl.create_external_printer().ok();
+    let printer_opt = rl.create_external_printer().ok();
 
     #[cfg(windows)]
     {
