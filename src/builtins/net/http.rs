@@ -113,16 +113,17 @@ async fn serve(options: HttpOptions) -> Result<(), String> {
         bound
     );
 
-    let root = Arc::new(options.root);
+    axum::serve(listener, router(Arc::new(options.root)))
+        .await
+        .map_err(|error| format!("server failed: {}", error))
+}
+
+fn router(root: Arc<PathBuf>) -> Router {
     let listing = Router::new()
         .fallback(get(list_directory))
         .with_state(Arc::clone(&root));
-    let service = ServeDir::new(root.as_path()).not_found_service(listing);
-    let app = Router::new().fallback_service(service);
-
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| format!("server failed: {}", error))
+    let service = ServeDir::new(root.as_path()).fallback(listing);
+    Router::new().fallback_service(service)
 }
 
 async fn list_directory(
@@ -255,6 +256,8 @@ fn escape_html(value: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     #[test]
     fn resolves_paths_inside_root_only() {
@@ -274,6 +277,39 @@ mod tests {
         assert_eq!(resolve_path(&root, "/%2e%2e/"), None);
         assert_eq!(resolve_path(&root, "/%5c..%5c"), None);
         assert_eq!(resolve_path(&root, "/missing"), None);
+    }
+
+    #[tokio::test]
+    async fn directory_listing_returns_ok_and_rejects_traversal() {
+        let directory = tempdir().expect("temporary directory");
+        std::fs::create_dir(directory.path().join("sub")).expect("subdirectory");
+        std::fs::write(directory.path().join("sub/file.txt"), b"file").expect("file");
+        let root = Arc::new(directory.path().canonicalize().expect("canonical root"));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router(root)).await;
+        });
+
+        let listing = request(address, "/sub/").await;
+        assert!(listing.starts_with("HTTP/1.1 200"), "{listing}");
+        assert!(listing.contains("file.txt"), "{listing}");
+
+        let traversal = request(address, "/%2e%2e/").await;
+        assert!(traversal.starts_with("HTTP/1.1 404"), "{traversal}");
+
+        server.abort();
+    }
+
+    async fn request(address: SocketAddr, path: &str) -> String {
+        let mut stream = TcpStream::connect(address).await.expect("connect");
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read");
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     #[test]

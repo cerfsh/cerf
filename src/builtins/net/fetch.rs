@@ -103,7 +103,10 @@ fn run_fetch(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32)
         }
     };
 
-    let result = runtime::block_on(tokio::time::timeout(REQUEST_TIMEOUT, fetch(options)));
+    let result =
+        runtime::block_on(
+            async move { tokio::time::timeout(REQUEST_TIMEOUT, fetch(options)).await },
+        );
 
     match result {
         Ok(Ok(())) => (ExecutionResult::KeepRunning, 0),
@@ -278,5 +281,12 @@ mod tests {
             parse_args(&["--insecure".to_string(), "https://example.com".to_string()]).is_err()
         );
         assert!(parse_args(&["-o".to_string()]).is_err());
+    }
+
+    #[test]
+    fn command_creates_its_own_runtime_context() {
+        let mut state = ShellState::new();
+        let (_, code) = run_fetch(&["http://127.0.0.1:9/".to_string()], &mut state);
+        assert_eq!(code, 1);
     }
 }
