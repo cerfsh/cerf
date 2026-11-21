@@ -1,5 +1,6 @@
 pub mod addr;
 pub mod client;
+pub mod dns;
 pub mod fetch;
 pub mod ip;
 pub mod listen;

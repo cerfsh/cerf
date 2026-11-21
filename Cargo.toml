@@ -24,6 +24,7 @@ reqwest = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 url = "2.5.8"
+hickory-resolver = "0.25"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.1", features = ["signal", "process", "term"] }
