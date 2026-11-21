@@ -100,6 +100,7 @@ async fn listen_tcp(address: SocketAddr) -> Result<(), io::Error> {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("net.listen: accept failed: {}", error);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             }
         };

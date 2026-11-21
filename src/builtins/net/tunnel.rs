@@ -19,7 +19,7 @@ pub const COMMAND_INFO: crate::builtins::registry::CommandInfo =
     crate::builtins::registry::CommandInfo {
         name: "net.tunnel",
         description: "Forwards a local TCP or UDP port to another host.",
-        usage: "net.tunnel LOCAL_PORT TARGET_HOST TARGET_PORT [--bind IP] [--udp] [--idle-timeout SECONDS]",
+        usage: "net.tunnel LOCAL_PORT TARGET_HOST TARGET_PORT [--bind IP] [--udp] [--idle-timeout SECONDS]\n\n--idle-timeout applies to UDP sessions.",
         run: run_tunnel,
     };
 
@@ -124,7 +124,14 @@ async fn tunnel_tcp(options: &TunnelOptions) -> Result<(), io::Error> {
                 }
             }
             accepted = listener.accept() => {
-                let (client, peer) = accepted?;
+                let (client, peer) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        eprintln!("net.tunnel: accept failed: {}", error);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
                 let permit = Arc::clone(&limit).acquire_owned().await.map_err(io::Error::other)?;
                 let host = options.target_host.clone();
                 let port = options.target_port;
@@ -167,7 +174,13 @@ async fn tunnel_udp(options: &TunnelOptions) -> Result<(), io::Error> {
     loop {
         tokio::select! {
             received = local.recv_from(&mut buffer) => {
-                let (length, peer) = received?;
+                let (length, peer) = match received {
+                    Ok(datagram) => datagram,
+                    Err(error) => {
+                        eprintln!("net.tunnel: UDP receive failed: {}", error);
+                        continue;
+                    }
+                };
                 let payload = buffer[..length].to_vec();
 
                 if let Some(session) = sessions.get(&peer) {

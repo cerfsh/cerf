@@ -59,11 +59,17 @@ fn parse_args(args: &[String]) -> Result<FetchOptions, String> {
             let Some(value) = args.get(index) else {
                 return Err(format!("{} requires a path", argument));
             };
+            if value.is_empty() {
+                return Err("output path must not be empty".to_string());
+            }
             if output.replace(expand_home(value)).is_some() {
                 return Err("output path was provided more than once".to_string());
             }
         } else if parse_options {
             if let Some(value) = argument.strip_prefix("--output=") {
+                if value.is_empty() {
+                    return Err("output path must not be empty".to_string());
+                }
                 if output.replace(expand_home(value)).is_some() {
                     return Err("output path was provided more than once".to_string());
                 }
@@ -279,6 +285,7 @@ mod tests {
             parse_args(&["--insecure".to_string(), "https://example.com".to_string()]).is_err()
         );
         assert!(parse_args(&["-o".to_string()]).is_err());
+        assert!(parse_args(&["--output=".to_string(), "https://example.com".to_string()]).is_err());
     }
 
     #[test]
