@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::net::TcpStream;
 
 pub fn parse_port(value: &str, allow_zero: bool) -> Result<u16, String> {
     let port: u16 = value
@@ -54,8 +55,24 @@ pub async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     Ok(unique)
 }
 
-pub fn display_endpoint(address: &SocketAddr) -> String {
-    address.to_string()
+pub async fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    let addresses = resolve(host, port).await?;
+    let deadline = Instant::now() + timeout;
+    let mut last_error = format!("could not connect to {}:{}", host, port);
+
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => last_error = format!("{}: {}", address, error),
+            Err(_) => last_error = format!("{}: connection timed out", address),
+        }
+    }
+
+    Err(last_error)
 }
 
 #[cfg(test)]
