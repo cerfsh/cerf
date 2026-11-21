@@ -180,7 +180,6 @@ mod tests {
             "--interval-ms".to_string(),
             "50".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert_eq!(options.port, 443);
         assert_eq!(options.timeout, Duration::from_secs(2));

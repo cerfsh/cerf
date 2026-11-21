@@ -260,7 +260,6 @@ mod tests {
             "download.bin".to_string(),
             "https://example.com/file".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert_eq!(before.output, Some(PathBuf::from("download.bin")));
 
@@ -269,7 +268,6 @@ mod tests {
             "-o".to_string(),
             "download.bin".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert_eq!(after.output, Some(PathBuf::from("download.bin")));
     }

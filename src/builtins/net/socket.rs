@@ -178,9 +178,7 @@ mod tests {
 
     #[test]
     fn parses_tcp_and_udp_options() {
-        let tcp = parse_args(&["localhost".to_string(), "9000".to_string()])
-            .ok()
-            .expect("parse");
+        let tcp = parse_args(&["localhost".to_string(), "9000".to_string()]).expect("parse");
         assert!(!tcp.udp);
         assert_eq!(tcp.connect_timeout, DEFAULT_CONNECT_TIMEOUT);
 
@@ -191,7 +189,6 @@ mod tests {
             "--idle-timeout".to_string(),
             "2".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert!(udp.udp);
         assert_eq!(udp.idle_timeout, Duration::from_secs(2));

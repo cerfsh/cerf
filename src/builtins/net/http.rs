@@ -326,7 +326,6 @@ mod tests {
             "--port".to_string(),
             "0".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert_eq!(options.bind, SocketAddr::from(([127, 0, 0, 1], 0)));
 

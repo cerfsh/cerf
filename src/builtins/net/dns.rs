@@ -220,9 +220,7 @@ mod tests {
 
     #[test]
     fn parses_record_types_and_defaults() {
-        let options = parse_args(&["example.com".to_string()])
-            .ok()
-            .expect("parse");
+        let options = parse_args(&["example.com".to_string()]).expect("parse");
         assert_eq!(options.record_types, vec![RecordType::A, RecordType::AAAA]);
 
         let options = parse_args(&[
@@ -232,7 +230,6 @@ mod tests {
             "--server".to_string(),
             "127.0.0.1:5353".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert_eq!(options.record_types, vec![RecordType::MX]);
         assert_eq!(
@@ -249,7 +246,6 @@ mod tests {
         );
         assert!(
             lookup_name("2001:db8::1")
-                .ok()
                 .expect("reverse name")
                 .to_utf8()
                 .ends_with("ip6.arpa.")

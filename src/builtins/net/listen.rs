@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn parses_tcp_and_udp_listeners() {
-        let tcp = parse_args(&["9000".to_string()]).ok().expect("parse");
+        let tcp = parse_args(&["9000".to_string()]).expect("parse");
         assert_eq!(tcp.bind, SocketAddr::from(([127, 0, 0, 1], 9000)));
         assert!(!tcp.udp);
 
@@ -172,7 +172,6 @@ mod tests {
             "0.0.0.0".to_string(),
             "9000".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert!(udp.udp);
         assert_eq!(udp.bind, SocketAddr::from(([0, 0, 0, 0], 9000)));

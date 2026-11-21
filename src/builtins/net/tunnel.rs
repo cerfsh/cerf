@@ -216,10 +216,12 @@ async fn tunnel_udp(options: &TunnelOptions) -> Result<(), io::Error> {
                 }
             }
             event = event_receiver.recv() => {
-                if let Some((peer, id)) = event {
-                    if sessions.get(&peer).is_some_and(|session| session.id == id) {
-                        sessions.remove(&peer);
-                    }
+                if let Some((peer, id)) = event
+                    && sessions
+                        .get(&peer)
+                        .is_some_and(|session| session.id == id)
+                {
+                    sessions.remove(&peer);
                 }
             }
         }
@@ -263,7 +265,6 @@ mod tests {
             "example.com".to_string(),
             "80".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert_eq!(tcp.bind, SocketAddr::from(([127, 0, 0, 1], 8080)));
         assert_eq!(tcp.target_port, 80);
@@ -278,7 +279,6 @@ mod tests {
             "--idle-timeout".to_string(),
             "5".to_string(),
         ])
-        .ok()
         .expect("parse");
         assert!(udp.udp);
         assert_eq!(udp.idle_timeout, Duration::from_secs(5));
