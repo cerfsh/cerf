@@ -14,7 +14,7 @@ pub const COMMAND_INFO: crate::builtins::registry::CommandInfo =
     crate::builtins::registry::CommandInfo {
         name: "net.socket",
         description: "Connects a TCP or UDP socket to standard input and output.",
-        usage: "net.socket HOST PORT [--udp] [--connect-timeout SECONDS] [--idle-timeout SECONDS]\n\nTCP is a raw byte stream. UDP uses one line of stdin per datagram and newline-frames received datagrams.",
+        usage: "net.socket HOST PORT [--udp] [--connect-timeout SECONDS] [--idle-timeout SECONDS]\n\nTCP is a raw byte stream. UDP uses one line of stdin per datagram and newline-frames received datagrams. --idle-timeout applies to UDP.",
         run: run_socket,
     };
 

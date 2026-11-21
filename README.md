@@ -102,7 +102,7 @@ net.dns 192.0.2.1 --server 1.1.1.1
 
 `net.fetch` supports HTTP and HTTPS GET requests only. It streams binary response bodies without modification, rejects non-2xx responses, and writes file output through a temporary file before replacing the destination. `net.ip` and `net.whoami` disclose the caller's address to `api64.ipify.org` (or `api.ipify.org` and `api6.ipify.org` when selecting a family).
 
-`net.http`, `net.listen`, and `net.tunnel` do not provide authentication or TLS. Keep their default loopback binding unless the exposed data and network are trusted. TCP listeners handle one client at a time to keep raw output unambiguous. TCP data is copied as raw bytes; UDP standard input and output use newline-delimited datagrams. A TCP socket shuts down its write half when stdin reaches EOF and continues reading the response until the peer closes.
+`net.http`, `net.listen`, and `net.tunnel` do not provide authentication or TLS. Keep their default loopback binding unless the exposed data and network are trusted. TCP listeners handle one client at a time to keep raw output unambiguous. TCP data is copied as raw bytes; UDP standard input and output use newline-delimited datagrams, and `net.socket --idle-timeout` applies only to UDP. A TCP socket shuts down its write half when stdin reaches EOF and continues reading the response until the peer closes.
 
 ## Scripting Best Practices
 
