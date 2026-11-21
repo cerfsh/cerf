@@ -46,6 +46,32 @@ fn pipeline_status_uses_last_builtin() {
 }
 
 #[test]
+fn all_network_commands_are_registered() {
+    for name in [
+        "net.fetch",
+        "net.wfp",
+        "net.http",
+        "net.listen",
+        "net.whoami",
+        "net.ip",
+        "net.dns",
+        "net.tunnel",
+        "net.socket",
+    ] {
+        let output = cerf()
+            .args(["-c", &format!("sys.type {name}")])
+            .output()
+            .expect("run cerf");
+        assert_eq!(output.status.code(), Some(0), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("is a shell builtin"),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
 fn background_builtin_starts_one_tracked_process() {
     let output = cerf()
         .args(["-c", "test.true &"])
