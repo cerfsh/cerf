@@ -55,7 +55,10 @@ fn background_builtin_starts_one_tracked_process() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
-        stdout.lines().filter(|line| line.starts_with("[1] ")).count(),
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("[1] "))
+            .count(),
         1,
         "stdout was {stdout:?}"
     );
