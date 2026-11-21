@@ -69,7 +69,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let printer_opt = rl.create_external_printer().ok();
 
     #[cfg(windows)]
     {
@@ -79,7 +78,6 @@ fn main() -> ExitCode {
 
         std::thread::spawn(move || {
             use windows_sys::Win32::System::IO::GetQueuedCompletionStatus;
-            use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
 
             loop {
                 let mut num_bytes = 0;
@@ -101,20 +99,6 @@ fn main() -> ExitCode {
                     let event_job_id = comp_key;
                     let pid = overlapped as usize as u32;
 
-                    let is_active_zero = msg == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
-
-                    if is_active_zero {
-                        let fg = FG_JOB.load(std::sync::atomic::Ordering::Relaxed);
-                        if fg != event_job_id {
-                            if let Some(ref mut p) = printer_opt {
-                                let _ = p.print(format!("\n[{}] Done", event_job_id));
-                            } else {
-                                // Fallback
-                                eprintln!("\n[{}] Done", event_job_id);
-                            }
-                        }
-                    }
-
                     let _ = tx.send(engine::job_control::IocpMessage {
                         msg,
                         job_id: event_job_id,
@@ -127,8 +111,7 @@ fn main() -> ExitCode {
 
     let mut input_buffer = String::new();
     loop {
-        // Poll for any background jobs that have finished
-        #[cfg(unix)]
+        // Poll for any background jobs that have finished.
         engine::job_control::update_jobs(&mut state);
 
         // Ensure shell owns the terminal
