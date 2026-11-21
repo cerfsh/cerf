@@ -65,6 +65,7 @@ pub const BUILTINS: &[CommandInfo] = &[
     builtins::fs::df::COMMAND_INFO,
     builtins::net::dns::COMMAND_INFO,
     builtins::net::fetch::COMMAND_INFO,
+    builtins::net::http::COMMAND_INFO,
     builtins::net::ip::COMMAND_INFO,
     builtins::net::listen::COMMAND_INFO,
     builtins::net::socket::COMMAND_INFO,
