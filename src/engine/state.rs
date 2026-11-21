@@ -312,8 +312,6 @@ pub enum ExecutionResult {
     Exit,
     Break,
     Continue,
-    Success,
-    Failure,
 }
 
 /// Initialize shell variables from the OS environment and set defaults for missing ones.

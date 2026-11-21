@@ -4,15 +4,40 @@ mod parser;
 mod signals;
 
 use engine::ShellState;
-use rustyline::{Editor, history::DefaultHistory};
 use rustyline::error::ReadlineError;
+use rustyline::{Editor, history::DefaultHistory};
 use std::env;
+use std::process::ExitCode;
 use std::sync::atomic::AtomicUsize;
 
 pub static FG_JOB: AtomicUsize = AtomicUsize::new(0);
 
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
 
-fn main() -> rustyline::Result<()> {
+    if args.get(1).is_some_and(|arg| arg == "--internal-builtin") {
+        let Some(name) = args.get(2) else {
+            eprintln!("cerf: --internal-builtin requires a builtin name");
+            return ExitCode::from(2);
+        };
+        return ExitCode::from(run_internal_builtin(name, &args[3..]) as u8);
+    }
+
+    if args.len() >= 3 && args[1] == "-c" {
+        let input = &args[2];
+        let mut state = ShellState::new();
+        let code = match parser::parse_pipeline(input, &state.variables) {
+            Some(entries) => engine::execute_list(entries, &mut state).1,
+            None => 2,
+        };
+        return ExitCode::from(code as u8);
+    }
+
+    if args.len() == 2 && args[1] == "--version" {
+        println!("v{}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
     signals::init();
 
     // Initialize job control
@@ -33,24 +58,17 @@ fn main() -> rustyline::Result<()> {
         state.shell_pgid = Some(nix::unistd::Pid::from_raw(nix::unistd::getpid().as_raw()));
     }
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() >= 3 && args[1] == "-c" {
-        let input = &args[2];
-        if let Some(entries) = parser::parse_pipeline(input, &state.variables) {
-            let _ = engine::execute_list(entries, &mut state);
-        }
-        return Ok(());
-    }
-    else if args.len() == 2 && args[1] == "--version" {
-        println!("v{}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
     // Source the user profile (~/.cerfrc) for interactive sessions.
     source_profile(&mut state);
 
     let config = rustyline::Config::builder().bracketed_paste(true).build();
-    let mut rl = Editor::<(), DefaultHistory>::with_config(config)?;
+    let mut rl = match Editor::<(), DefaultHistory>::with_config(config) {
+        Ok(editor) => editor,
+        Err(error) => {
+            eprintln!("cerf: {}", error);
+            return ExitCode::FAILURE;
+        }
+    };
     let printer_opt = rl.create_external_printer().ok();
 
     #[cfg(windows)]
@@ -118,13 +136,17 @@ fn main() -> rustyline::Result<()> {
         engine::job_control::restore_terminal(&state);
 
         let prompt = if input_buffer.is_empty() {
-            expand_prompt(&state
-                .get_var_string("PS1")
-                .unwrap_or_else(|| "\\u@\\h:\\w\\$ ".to_string()))
+            expand_prompt(
+                &state
+                    .get_var_string("PS1")
+                    .unwrap_or_else(|| "\\u@\\h:\\w\\$ ".to_string()),
+            )
         } else {
-            expand_prompt(&state
-                .get_var_string("PS2")
-                .unwrap_or_else(|| "> ".to_string()))
+            expand_prompt(
+                &state
+                    .get_var_string("PS2")
+                    .unwrap_or_else(|| "> ".to_string()),
+            )
         };
 
         let readline = rl.readline(&prompt);
@@ -163,7 +185,11 @@ fn main() -> rustyline::Result<()> {
                 state.add_history(&input);
 
                 if let Some(entries) = parser::parse_pipeline(&input, &state.variables)
-                    && let (engine::ExecutionResult::Exit, _) = engine::execute_list(entries, &mut state) { break }
+                    && let (engine::ExecutionResult::Exit, _) =
+                        engine::execute_list(entries, &mut state)
+                {
+                    break;
+                }
             }
             Err(ReadlineError::Interrupted) => {
                 input_buffer.clear();
@@ -186,7 +212,16 @@ fn main() -> rustyline::Result<()> {
             }
         }
     }
-    Ok(())
+    ExitCode::SUCCESS
+}
+
+fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
+    let Some(command) = builtins::registry::find_command(name) else {
+        eprintln!("cerf: {}: not a shell builtin", name);
+        return 127;
+    };
+    let mut state = ShellState::new();
+    (command.run)(args, &mut state).1
 }
 
 /// Source `~/.cerfrc` if it exists.
@@ -202,20 +237,20 @@ fn source_profile(state: &mut ShellState) {
 
 fn expand_prompt(prompt: &str) -> String {
     let mut result = prompt.to_string();
-    
+
     if result.contains("\\u") {
         let user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "user".to_string());
         result = result.replace("\\u", &user);
     }
-    
+
     if result.contains("\\h") {
         let host = sysinfo::System::host_name().unwrap_or_else(|| "localhost".to_string());
         let short_host = host.split('.').next().unwrap_or("localhost");
         result = result.replace("\\h", short_host);
     }
-    
+
     if result.contains("\\w") {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let mut cwd_str = cwd.display().to_string();
@@ -232,11 +267,11 @@ fn expand_prompt(prompt: &str) -> String {
         }
         result = result.replace("\\w", &cwd_str);
     }
-    
+
     if result.contains("\\$") {
         let is_root = std::env::var("UID").unwrap_or_default() == "0";
         result = result.replace("\\$", if is_root { "#" } else { "$" });
     }
-    
+
     result
 }
