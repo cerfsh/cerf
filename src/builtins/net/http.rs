@@ -2,8 +2,9 @@ use crate::builtins::net::{addr, runtime};
 use crate::engine::{ExecutionResult, ShellState};
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{OriginalUri, State};
+use axum::extract::{OriginalUri, Request, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use std::net::SocketAddr;
@@ -123,7 +124,20 @@ fn router(root: Arc<PathBuf>) -> Router {
         .fallback(get(list_directory))
         .with_state(Arc::clone(&root));
     let service = ServeDir::new(root.as_path()).fallback(listing);
-    Router::new().fallback_service(service)
+    Router::new()
+        .fallback_service(service)
+        .layer(middleware::from_fn_with_state(root, validate_root_path))
+}
+
+async fn validate_root_path(
+    State(root): State<Arc<PathBuf>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if resolve_path(&root, request.uri().path()).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
 }
 
 async fn list_directory(
@@ -288,8 +302,9 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let address = listener.local_addr().expect("address");
+        let server_root = Arc::clone(&root);
         let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, router(root)).await;
+            let _ = axum::serve(listener, router(server_root)).await;
         });
 
         let listing = request(address, "/sub/").await;
@@ -298,6 +313,16 @@ mod tests {
 
         let traversal = request(address, "/%2e%2e/").await;
         assert!(traversal.starts_with("HTTP/1.1 404"), "{traversal}");
+
+        #[cfg(unix)]
+        {
+            let outside = tempdir().expect("outside directory");
+            std::fs::write(outside.path().join("secret.txt"), b"secret").expect("secret file");
+            std::os::unix::fs::symlink(outside.path(), root.join("escape"))
+                .expect("symlink outside root");
+            let escaped = request(address, "/escape/secret.txt").await;
+            assert!(escaped.starts_with("HTTP/1.1 404"), "{escaped}");
+        }
 
         server.abort();
     }
