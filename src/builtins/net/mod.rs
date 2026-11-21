@@ -6,5 +6,6 @@ pub mod listen;
 pub mod runtime;
 pub mod socket;
 pub mod stream;
+pub mod tunnel;
 pub mod wfp;
 pub mod whoami;
