@@ -211,10 +211,9 @@ fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
         unsafe { env::remove_var(engine::state::SNAPSHOT_ENV) };
         match std::fs::read(&path) {
             Ok(bytes) => {
-                if state.apply_snapshot(&bytes) {
-                    // Command-prefix assignments arrive through the
-                    // environment and must win over the snapshot for this
-                    // one invocation.
+                if let Some(assignments) = state.apply_snapshot(&bytes) {
+                    // Preserve the snapshot values of unexported variables
+                    // when merging the inherited environment.
                     for (key, value) in env::vars() {
                         match state.variables.get_mut(&key) {
                             Some(var) if var.exported => {
@@ -227,6 +226,14 @@ fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
                                 state.variables.insert(key, var);
                             }
                         }
+                    }
+                    for (key, value) in assignments {
+                        let var = state
+                            .variables
+                            .entry(key)
+                            .or_insert_with(|| engine::state::Variable::new_string(String::new()));
+                        var.value = engine::state::VarValue::String(value);
+                        var.exported = true;
                     }
                 } else {
                     eprintln!("cerf: warning: ignoring malformed state snapshot");

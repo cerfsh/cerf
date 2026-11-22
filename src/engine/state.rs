@@ -317,7 +317,7 @@ impl ShellState {
 
     /// Serialize variables and `set` options so an internal-builtin child can
     /// start from the parent's launch-time state.
-    pub fn snapshot(&self) -> Vec<u8> {
+    fn snapshot(&self, assignments: &[(String, String)]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(self.variables.len() as u32).to_le_bytes());
         for (name, var) in &self.variables {
@@ -340,47 +340,39 @@ impl ShellState {
         for option in &self.set_options {
             push_bytes(&mut out, option.as_bytes());
         }
+        out.extend_from_slice(&(assignments.len() as u32).to_le_bytes());
+        for (key, value) in assignments {
+            push_bytes(&mut out, key.as_bytes());
+            push_bytes(&mut out, value.as_bytes());
+        }
         out
     }
 
-    /// Write [`Self::snapshot`] to a temp file and return its path. The file
-    /// is left on disk because the background child may read it after the
-    /// parent has already moved on; the child removes it after loading.
-    pub fn write_snapshot(&self) -> Option<PathBuf> {
-        let mut file = tempfile::NamedTempFile::new().ok()?;
-        file.write_all(&self.snapshot()).ok()?;
-        file.flush().ok()?;
-        file.into_temp_path().keep().ok()
+    /// Write a launch snapshot. The caller owns cleanup until the child starts.
+    pub fn write_snapshot(
+        &self,
+        assignments: &[(String, String)],
+    ) -> std::io::Result<tempfile::TempPath> {
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(&self.snapshot(assignments))?;
+        file.flush()?;
+        Ok(file.into_temp_path())
     }
 
-    /// Replace variables and options with a snapshot produced by
-    /// [`Self::snapshot`]. Returns `false` for a malformed snapshot.
-    pub fn apply_snapshot(&mut self, bytes: &[u8]) -> bool {
+    /// Restore variables and options and return the separate prefix assignments.
+    /// Returns `None` for a malformed snapshot.
+    pub fn apply_snapshot(&mut self, bytes: &[u8]) -> Option<Vec<(String, String)>> {
         let mut pos = 0;
-        let Some(var_count) = take_u32(bytes, &mut pos) else {
-            return false;
-        };
+        let var_count = take_u32(bytes, &mut pos)?;
         let mut variables = HashMap::new();
         for _ in 0..var_count {
-            let Some(&flags) = bytes.get(pos) else {
-                return false;
-            };
+            let &flags = bytes.get(pos)?;
             pos += 1;
-            let Some(name) = take_bytes(bytes, &mut pos).and_then(|b| std::str::from_utf8(b).ok())
-            else {
-                return false;
-            };
-            let Some(value_count) = take_u32(bytes, &mut pos) else {
-                return false;
-            };
+            let name = take_string(bytes, &mut pos)?;
+            let value_count = take_u32(bytes, &mut pos)?;
             let mut values = Vec::new();
             for _ in 0..value_count {
-                let Some(value) =
-                    take_bytes(bytes, &mut pos).and_then(|b| std::str::from_utf8(b).ok())
-                else {
-                    return false;
-                };
-                values.push(value.to_string());
+                values.push(take_string(bytes, &mut pos)?);
             }
             let value = if flags & 1 == 1 {
                 VarValue::Array(values)
@@ -388,7 +380,7 @@ impl ShellState {
                 VarValue::String(values.into_iter().next().unwrap_or_default())
             };
             variables.insert(
-                name.to_string(),
+                name,
                 Variable {
                     value,
                     readonly: flags & 2 != 0,
@@ -397,24 +389,22 @@ impl ShellState {
                 },
             );
         }
-        let Some(option_count) = take_u32(bytes, &mut pos) else {
-            return false;
-        };
+        let option_count = take_u32(bytes, &mut pos)?;
         let mut options = HashSet::new();
         for _ in 0..option_count {
-            let Some(option) =
-                take_bytes(bytes, &mut pos).and_then(|b| std::str::from_utf8(b).ok())
-            else {
-                return false;
-            };
-            options.insert(option.to_string());
+            options.insert(take_string(bytes, &mut pos)?);
+        }
+        let assignment_count = take_u32(bytes, &mut pos)?;
+        let mut assignments = Vec::new();
+        for _ in 0..assignment_count {
+            assignments.push((take_string(bytes, &mut pos)?, take_string(bytes, &mut pos)?));
         }
         if pos != bytes.len() {
-            return false;
+            return None;
         }
         self.variables = variables;
         self.set_options = options;
-        true
+        Some(assignments)
     }
 }
 
@@ -443,6 +433,11 @@ fn take_bytes<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
     let slice = bytes.get(*pos..end)?;
     *pos = end;
     Some(slice)
+}
+
+fn take_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
+    let bytes = take_bytes(bytes, pos)?;
+    Some(std::str::from_utf8(bytes).ok()?.to_owned())
 }
 
 /// Initialize shell variables from the OS environment and set defaults for missing ones.
@@ -711,7 +706,11 @@ mod tests {
         parent.set_options.insert("errexit".to_string());
 
         let mut child = ShellState::new();
-        assert!(child.apply_snapshot(&parent.snapshot()));
+        let assignments = vec![("CERF_SNAPSHOT_TEST".into(), "override".into())];
+        assert_eq!(
+            child.apply_snapshot(&parent.snapshot(&assignments)),
+            Some(assignments)
+        );
         let var = child.get_var("CERF_SNAPSHOT_TEST").expect("string var");
         assert_eq!(var.value, VarValue::String("value".to_string()));
         assert!(var.integer);
@@ -721,6 +720,6 @@ mod tests {
             VarValue::Array(vec!["a".to_string(), "b".to_string()])
         );
         assert!(child.set_options.contains("errexit"));
-        assert!(!child.apply_snapshot(b"not a snapshot"));
+        assert!(child.apply_snapshot(b"not a snapshot").is_none());
     }
 }

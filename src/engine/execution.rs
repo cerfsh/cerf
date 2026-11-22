@@ -37,7 +37,7 @@ pub(crate) fn execute_isolated(
         negated: false,
         background: false,
     };
-    execute_process(command, name, &pipeline, state)
+    execute_process(command, name, &pipeline, state, None)
 }
 
 fn apply_command_io(
@@ -70,6 +70,7 @@ fn execute_process(
     name: &str,
     pipeline: &Pipeline,
     state: &mut ShellState,
+    snapshot: Option<tempfile::TempPath>,
 ) -> (ExecutionResult, i32) {
     #[cfg(unix)]
     let is_background = pipeline.background;
@@ -107,6 +108,10 @@ fn execute_process(
 
     let code = match result {
         Ok(child) => {
+            if let Some(mut snapshot) = snapshot {
+                // The child can now read and remove the snapshot.
+                snapshot.disable_cleanup(true);
+            }
             #[cfg(windows)]
             let mut child = child;
             let pid = child.id();
@@ -115,6 +120,10 @@ fn execute_process(
             // simply reaped; the terminal already belongs to an ancestor.
             #[cfg(unix)]
             if !manage_job_control {
+                if pipeline.background {
+                    // The nonblocking job poll also reaps untracked children.
+                    return (ExecutionResult::KeepRunning, 0);
+                }
                 let mut child = child;
                 let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
                 return (ExecutionResult::KeepRunning, code);
@@ -295,16 +304,25 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
             command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
             // Background builtins run in a child process, so hand them a
             // launch-time copy of the variables and options.
-            if pipeline.background
-                && let Some(path) = state.write_snapshot()
-            {
-                command.env(super::state::SNAPSHOT_ENV, path);
-            }
+            let snapshot = if pipeline.background {
+                match state.write_snapshot(&cmd.assignments) {
+                    Ok(path) => {
+                        command.env(super::state::SNAPSHOT_ENV, path.as_os_str());
+                        Some(path)
+                    }
+                    Err(error) => {
+                        eprintln!("cerf: could not write state snapshot: {}", error);
+                        return (ExecutionResult::KeepRunning, 1);
+                    }
+                }
+            } else {
+                None
+            };
             if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
                 eprintln!("{}", error);
                 return (ExecutionResult::KeepRunning, 1);
             }
-            return execute_process(command, launch_name, pipeline, state);
+            return execute_process(command, launch_name, pipeline, state, snapshot);
         }
 
         let run_generic =
@@ -371,7 +389,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
             return (ExecutionResult::KeepRunning, 1);
         }
 
-        execute_process(command, &name, pipeline, state)
+        execute_process(command, &name, pipeline, state, None)
     }
 }
 
@@ -863,6 +881,11 @@ pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (Exec
         }
 
         let (result, code) = execute(&entry.pipeline, state);
+        // Internal builtin processes have no interactive loop to poll children.
+        #[cfg(unix)]
+        if state.internal_builtin {
+            crate::engine::job_control::update_jobs(state);
+        }
         last_code = code;
 
         if let ExecutionResult::Exit = result {
