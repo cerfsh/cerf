@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         let mut state = ShellState::new();
         let code = match parser::parse_pipeline(input, &state.variables) {
             Some(entries) => engine::execute_list(entries, &mut state).1,
-            None if input.trim().is_empty() || input.trim_start().starts_with('#') => 0,
+            None if parser::is_blank_or_comment_only(input) => 0,
             None => 2,
         };
         return ExitCode::from(code as u8);
@@ -205,6 +205,37 @@ fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
         return 127;
     };
     let mut state = ShellState::new();
+    state.internal_builtin = true;
+    if let Some(path) = env::var_os(engine::state::SNAPSHOT_ENV) {
+        // SAFETY: called before this process starts any threads.
+        unsafe { env::remove_var(engine::state::SNAPSHOT_ENV) };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if state.apply_snapshot(&bytes) {
+                    // Command-prefix assignments arrive through the
+                    // environment and must win over the snapshot for this
+                    // one invocation.
+                    for (key, value) in env::vars() {
+                        match state.variables.get_mut(&key) {
+                            Some(var) if var.exported => {
+                                var.value = engine::state::VarValue::String(value);
+                            }
+                            Some(_) => {}
+                            None => {
+                                let mut var = engine::state::Variable::new_string(value);
+                                var.exported = true;
+                                state.variables.insert(key, var);
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("cerf: warning: ignoring malformed state snapshot");
+                }
+            }
+            Err(error) => eprintln!("cerf: warning: could not read state snapshot: {}", error),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
     (command.run)(args, &mut state).1
 }
 

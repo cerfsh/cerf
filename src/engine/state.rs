@@ -119,6 +119,10 @@ impl Job {
     }
 }
 
+/// Environment variable holding the path of a launch-time state snapshot
+/// handed to an internal-builtin child process.
+pub const SNAPSHOT_ENV: &str = "CERF_INTERNAL_STATE";
+
 pub struct ShellState {
     pub previous_dir: Option<PathBuf>,
     pub dir_stack: Vec<PathBuf>,
@@ -136,6 +140,10 @@ pub struct ShellState {
     pub set_options: HashSet<String>,
     /// Command history (persisted to `~/.cerf_history`).
     pub history: Vec<String>,
+    /// True when this process was launched as an `--internal-builtin` child.
+    /// Such children must not take ownership of a job-control group or the
+    /// terminal, since they may already be a background process group.
+    pub internal_builtin: bool,
 
     // Job control
     pub jobs: HashMap<usize, Job>,
@@ -171,6 +179,7 @@ impl ShellState {
             positional_args: Vec::new(),
             set_options: HashSet::new(),
             history: Vec::new(),
+            internal_builtin: false,
             jobs: HashMap::new(),
             next_job_id: 1,
             current_job: None,
@@ -305,6 +314,108 @@ impl ShellState {
     fn history_path() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".cerf_history"))
     }
+
+    /// Serialize variables and `set` options so an internal-builtin child can
+    /// start from the parent's launch-time state.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(self.variables.len() as u32).to_le_bytes());
+        for (name, var) in &self.variables {
+            let (values, is_array): (Vec<&String>, bool) = match &var.value {
+                VarValue::String(value) => (vec![value], false),
+                VarValue::Array(values) => (values.iter().collect(), true),
+            };
+            let flags = (is_array as u8)
+                | ((var.readonly as u8) << 1)
+                | ((var.integer as u8) << 2)
+                | ((var.exported as u8) << 3);
+            out.push(flags);
+            push_bytes(&mut out, name.as_bytes());
+            out.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                push_bytes(&mut out, value.as_bytes());
+            }
+        }
+        out.extend_from_slice(&(self.set_options.len() as u32).to_le_bytes());
+        for option in &self.set_options {
+            push_bytes(&mut out, option.as_bytes());
+        }
+        out
+    }
+
+    /// Write [`Self::snapshot`] to a temp file and return its path. The file
+    /// is left on disk because the background child may read it after the
+    /// parent has already moved on; the child removes it after loading.
+    pub fn write_snapshot(&self) -> Option<PathBuf> {
+        let mut file = tempfile::NamedTempFile::new().ok()?;
+        file.write_all(&self.snapshot()).ok()?;
+        file.flush().ok()?;
+        file.into_temp_path().keep().ok()
+    }
+
+    /// Replace variables and options with a snapshot produced by
+    /// [`Self::snapshot`]. Returns `false` for a malformed snapshot.
+    pub fn apply_snapshot(&mut self, bytes: &[u8]) -> bool {
+        let mut pos = 0;
+        let Some(var_count) = take_u32(bytes, &mut pos) else {
+            return false;
+        };
+        let mut variables = HashMap::new();
+        for _ in 0..var_count {
+            let Some(&flags) = bytes.get(pos) else {
+                return false;
+            };
+            pos += 1;
+            let Some(name) = take_bytes(bytes, &mut pos).and_then(|b| std::str::from_utf8(b).ok())
+            else {
+                return false;
+            };
+            let Some(value_count) = take_u32(bytes, &mut pos) else {
+                return false;
+            };
+            let mut values = Vec::new();
+            for _ in 0..value_count {
+                let Some(value) =
+                    take_bytes(bytes, &mut pos).and_then(|b| std::str::from_utf8(b).ok())
+                else {
+                    return false;
+                };
+                values.push(value.to_string());
+            }
+            let value = if flags & 1 == 1 {
+                VarValue::Array(values)
+            } else {
+                VarValue::String(values.into_iter().next().unwrap_or_default())
+            };
+            variables.insert(
+                name.to_string(),
+                Variable {
+                    value,
+                    readonly: flags & 2 != 0,
+                    integer: flags & 4 != 0,
+                    exported: flags & 8 != 0,
+                },
+            );
+        }
+        let Some(option_count) = take_u32(bytes, &mut pos) else {
+            return false;
+        };
+        let mut options = HashSet::new();
+        for _ in 0..option_count {
+            let Some(option) =
+                take_bytes(bytes, &mut pos).and_then(|b| std::str::from_utf8(b).ok())
+            else {
+                return false;
+            };
+            options.insert(option.to_string());
+        }
+        if pos != bytes.len() {
+            return false;
+        }
+        self.variables = variables;
+        self.set_options = options;
+        true
+    }
 }
 
 pub enum ExecutionResult {
@@ -312,6 +423,26 @@ pub enum ExecutionResult {
     Exit,
     Break,
     Continue,
+}
+
+fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn take_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let end = pos.checked_add(4)?;
+    let slice = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(u32::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn take_bytes<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    let len = take_u32(bytes, pos)? as usize;
+    let end = pos.checked_add(len)?;
+    let slice = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(slice)
 }
 
 /// Initialize shell variables from the OS environment and set defaults for missing ones.
@@ -561,4 +692,35 @@ fn init_default_aliases() -> HashMap<String, String> {
         aliases.insert(name.to_string(), target.to_string());
     }
     aliases
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_round_trips_variables_and_options() {
+        let mut parent = ShellState::new();
+        let mut flag = Variable::new_string("value".to_string());
+        flag.integer = true;
+        parent.set_var("CERF_SNAPSHOT_TEST", flag);
+        parent.set_var(
+            "CERF_SNAPSHOT_ARRAY",
+            Variable::new_array(vec!["a".into(), "b".into()]),
+        );
+        parent.set_options.insert("errexit".to_string());
+
+        let mut child = ShellState::new();
+        assert!(child.apply_snapshot(&parent.snapshot()));
+        let var = child.get_var("CERF_SNAPSHOT_TEST").expect("string var");
+        assert_eq!(var.value, VarValue::String("value".to_string()));
+        assert!(var.integer);
+        let array = child.get_var("CERF_SNAPSHOT_ARRAY").expect("array var");
+        assert_eq!(
+            array.value,
+            VarValue::Array(vec!["a".to_string(), "b".to_string()])
+        );
+        assert!(child.set_options.contains("errexit"));
+        assert!(!child.apply_snapshot(b"not a snapshot"));
+    }
 }

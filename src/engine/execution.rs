@@ -74,19 +74,27 @@ fn execute_process(
     #[cfg(unix)]
     let is_background = pipeline.background;
 
+    // Internal-builtin children (`--internal-builtin`) may already run in a
+    // background process group with default SIGTTOU handling, so they must not
+    // claim a new process group or call `tcsetpgrp` (which would stop them).
+    #[cfg(unix)]
+    let manage_job_control = !state.internal_builtin;
+
     #[cfg(unix)]
     let result = unsafe {
         command
             .pre_exec(move || {
-                let pid = nix::unistd::getpid();
-                let _ = nix::unistd::setpgid(pid, pid);
-                if !is_background {
-                    let stdin = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDIN_FILENO);
-                    let stderr = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDERR_FILENO);
-                    let stdout = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDOUT_FILENO);
-                    let _ = nix::unistd::tcsetpgrp(stdin, pid)
-                        .or_else(|_| nix::unistd::tcsetpgrp(stderr, pid))
-                        .or_else(|_| nix::unistd::tcsetpgrp(stdout, pid));
+                if manage_job_control {
+                    let pid = nix::unistd::getpid();
+                    let _ = nix::unistd::setpgid(pid, pid);
+                    if !is_background {
+                        let stdin = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDIN_FILENO);
+                        let stderr = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDERR_FILENO);
+                        let stdout = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDOUT_FILENO);
+                        let _ = nix::unistd::tcsetpgrp(stdin, pid)
+                            .or_else(|_| nix::unistd::tcsetpgrp(stderr, pid))
+                            .or_else(|_| nix::unistd::tcsetpgrp(stdout, pid));
+                    }
                 }
                 signals::restore_default();
                 Ok(())
@@ -102,6 +110,15 @@ fn execute_process(
             #[cfg(windows)]
             let mut child = child;
             let pid = child.id();
+
+            // Job-control-less children are not registered as jobs and are
+            // simply reaped; the terminal already belongs to an ancestor.
+            #[cfg(unix)]
+            if !manage_job_control {
+                let mut child = child;
+                let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
+                return (ExecutionResult::KeepRunning, code);
+            }
 
             #[cfg(unix)]
             if state.shell_pgid.is_some() {
@@ -276,6 +293,13 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
             };
             let mut command = internal_command(launch_name, launch_args);
             command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
+            // Background builtins run in a child process, so hand them a
+            // launch-time copy of the variables and options.
+            if pipeline.background
+                && let Some(path) = state.write_snapshot()
+            {
+                command.env(super::state::SNAPSHOT_ENV, path);
+            }
             if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
                 eprintln!("{}", error);
                 return (ExecutionResult::KeepRunning, 1);

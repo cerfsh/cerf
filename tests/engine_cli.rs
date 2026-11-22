@@ -53,10 +53,24 @@ fn wrapped_isolated_builtin_receives_stdout_redirect() {
 
 #[test]
 fn empty_and_comment_scripts_succeed_but_syntax_errors_fail() {
-    for script in ["", "   ", "# comment"] {
+    for script in ["", "   ", "# comment", "# one\n  # two\n"] {
         let output = cerf().args(["-c", script]).output().expect("run cerf");
         assert_eq!(output.status.code(), Some(0), "script was {script:?}");
     }
+
+    // A leading comment must not swallow the command lines after it.
+    let output = cerf()
+        .args(["-c", "# comment\necho hi"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
+
+    let output = cerf()
+        .args(["-c", "# comment\n|"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(2));
 
     let output = cerf().args(["-c", "|"]).output().expect("run cerf");
     assert_eq!(output.status.code(), Some(2));
