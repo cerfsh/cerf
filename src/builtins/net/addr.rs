@@ -56,8 +56,15 @@ pub async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
 }
 
 pub async fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
-    let addresses = resolve(host, port).await?;
     let deadline = Instant::now() + timeout;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!("cannot resolve {}: resolution timed out", host));
+    }
+    let addresses = match tokio::time::timeout(remaining, resolve(host, port)).await {
+        Ok(result) => result?,
+        Err(_) => return Err(format!("cannot resolve {}: resolution timed out", host)),
+    };
     let mut last_error = format!("could not connect to {}:{}", host, port);
 
     for address in addresses {

@@ -134,17 +134,51 @@ async fn validate_root_path(
     request: Request,
     next: Next,
 ) -> Response {
-    if resolve_path(&root, request.uri().path()).is_none() {
+    let path = request.uri().path().to_string();
+    let allowed = tokio::task::spawn_blocking(move || request_allowed(&root, &path))
+        .await
+        .unwrap_or(false);
+    if !allowed {
         return StatusCode::NOT_FOUND.into_response();
     }
     next.run(request).await
+}
+
+fn request_allowed(root: &Path, request_path: &str) -> bool {
+    let Some(resolved) = resolve_path(root, request_path) else {
+        return false;
+    };
+    if !resolved.is_dir() {
+        return true;
+    }
+
+    // ServeDir appends index.html to directory requests, so validate the
+    // implicitly selected file just like an explicit request path.
+    match std::fs::symlink_metadata(resolved.join("index.html")) {
+        Ok(_) => {
+            let index_path = format!("{}/index.html", request_path.trim_end_matches('/'));
+            resolve_path(root, &index_path).is_some()
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 async fn list_directory(
     State(root): State<Arc<PathBuf>>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let Some(directory) = resolve_path(&root, uri.path()) else {
+    let path = uri.path().to_string();
+    match tokio::task::spawn_blocking(move || directory_listing(&root, &path)).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("net.http: directory listing task failed: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn directory_listing(root: &Path, request_path: &str) -> Response {
+    let Some(directory) = resolve_path(root, request_path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if !directory.is_dir() {
@@ -173,7 +207,7 @@ async fn list_directory(
     let mut html = String::from(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Directory listing</title></head><body><h1>Directory listing</h1><ul>",
     );
-    if uri.path() != "/" {
+    if request_path != "/" {
         html.push_str("<li><a href=\"../\">../</a></li>");
     }
     for (is_directory, name) in names {
@@ -323,6 +357,50 @@ mod tests {
             let escaped = request(address, "/escape/secret.txt").await;
             assert!(escaped.starts_with("HTTP/1.1 404"), "{escaped}");
         }
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn serves_directory_index_inside_root() {
+        let directory = tempdir().expect("temporary directory");
+        std::fs::write(directory.path().join("index.html"), b"inside root").expect("index");
+        let root = Arc::new(directory.path().canonicalize().expect("canonical root"));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server_root = Arc::clone(&root);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router(server_root)).await;
+        });
+
+        let response = request(address, "/").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("inside root"), "{response}");
+
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_directory_index_symlinked_outside_root() {
+        let directory = tempdir().expect("temporary directory");
+        let outside = tempdir().expect("outside directory");
+        std::fs::write(outside.path().join("index.html"), b"secret").expect("outside index");
+        let root = Arc::new(directory.path().canonicalize().expect("canonical root"));
+        std::os::unix::fs::symlink(outside.path().join("index.html"), root.join("index.html"))
+            .expect("symlink outside root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server_root = Arc::clone(&root);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router(server_root)).await;
+        });
+
+        let response = request(address, "/").await;
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert!(!response.contains("secret"), "{response}");
 
         server.abort();
     }

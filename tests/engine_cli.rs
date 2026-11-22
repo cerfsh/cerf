@@ -23,7 +23,7 @@ fn script_mode_propagates_builtin_status() {
 fn isolated_builtin_receives_stdout_redirect() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("fetch.out");
-    let command = format!("net.fetch file:///etc/passwd > {}", path.display());
+    let command = format!("net.fetch file:///etc/passwd > '{}'", path.display());
 
     let output = cerf().args(["-c", &command]).output().expect("run cerf");
 
@@ -33,6 +33,33 @@ fn isolated_builtin_receives_stdout_redirect() {
         "the engine should open the redirect before launching the isolated command"
     );
     assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 0);
+}
+
+#[test]
+fn wrapped_isolated_builtin_receives_stdout_redirect() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("wrapped.out");
+    let command = format!(
+        "sys.builtin net.fetch file:///etc/passwd > '{}'",
+        path.display()
+    );
+
+    let output = cerf().args(["-c", &command]).output().expect("run cerf");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(path.exists(), "wrapped command should receive the redirect");
+    assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 0);
+}
+
+#[test]
+fn empty_and_comment_scripts_succeed_but_syntax_errors_fail() {
+    for script in ["", "   ", "# comment"] {
+        let output = cerf().args(["-c", script]).output().expect("run cerf");
+        assert_eq!(output.status.code(), Some(0), "script was {script:?}");
+    }
+
+    let output = cerf().args(["-c", "|"]).output().expect("run cerf");
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]

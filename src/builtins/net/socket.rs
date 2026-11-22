@@ -115,7 +115,9 @@ async fn run_tcp(options: &SocketOptions) -> Result<(), io::Error> {
         eprintln!("net.socket: connected to {}", address);
     }
 
-    stream::bridge_tcp(stream, tokio::io::stdin(), tokio::io::stdout()).await
+    stream::bridge_tcp(stream, tokio::io::stdin(), tokio::io::stdout())
+        .await
+        .map_err(io::Error::from)
 }
 
 async fn run_udp(options: &SocketOptions) -> Result<(), io::Error> {
@@ -164,6 +166,9 @@ async fn run_udp(options: &SocketOptions) -> Result<(), io::Error> {
                 stdout.write_all(&buffer[..length]).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
+                if !stdin_open {
+                    idle_deadline = Some(tokio::time::Instant::now() + options.idle_timeout);
+                }
             }
             _ = idle, if !stdin_open => break,
         }

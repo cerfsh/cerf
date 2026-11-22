@@ -8,6 +8,7 @@ pub mod state;
 
 // Re-export the public API so that external code (`main.rs`, `builtins/`)
 // can continue to use `engine::ShellState`, `engine::ExecutionResult`, etc.
+pub(crate) use execution::execute_isolated;
 pub use execution::execute_list;
 pub use path::{expand_home, find_executable};
 pub use state::{ExecutionResult, JobState, ShellState};

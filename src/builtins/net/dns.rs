@@ -156,7 +156,7 @@ async fn resolve(options: &DnsOptions) -> Result<(Vec<String>, Vec<String>), Str
                 records.extend(
                     lookup
                         .iter()
-                        .map(|data| format!("{}\t{}", record_type, data)),
+                        .map(|data| format!("{}\t{}", data.record_type(), data)),
                 );
             }
             Err(error) => errors.push(format!("{}: {}", record_type, error)),

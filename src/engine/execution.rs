@@ -20,6 +20,26 @@ fn internal_command(name: &str, args: &[String]) -> Command {
     command
 }
 
+pub(crate) fn execute_isolated(
+    name: &str,
+    args: &[String],
+    state: &mut ShellState,
+) -> (ExecutionResult, i32) {
+    let command = internal_command(name, args);
+    let cmd = crate::parser::SimpleCommand {
+        assignments: Vec::new(),
+        name: Some(name.to_string()),
+        args: args.iter().cloned().map(Arg::plain).collect(),
+        redirects: Vec::new(),
+    };
+    let pipeline = Pipeline {
+        commands: vec![crate::parser::CommandNode::Simple(cmd)],
+        negated: false,
+        background: false,
+    };
+    execute_process(command, name, &pipeline, state)
+}
+
 fn apply_command_io(
     command: &mut Command,
     cmd: &crate::parser::SimpleCommand,
@@ -79,6 +99,8 @@ fn execute_process(
 
     let code = match result {
         Ok(child) => {
+            #[cfg(windows)]
+            let mut child = child;
             let pid = child.id();
 
             #[cfg(unix)]
@@ -229,6 +251,14 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
 
     let args = expand_globs(&expanded_args);
 
+    let isolated_wrapper = if matches!(name.as_str(), "sys.builtin" | "sys.command") {
+        args.first()
+            .filter(|target| builtins::registry::is_process_isolated(target.as_str()))
+            .map(|target| (target.as_str(), &args[1..]))
+    } else {
+        None
+    };
+
     if let Some(cmd_info) = builtins::registry::find_command(name.as_str()) {
         // Some builtins (like history, dirs) need access to the stdout redirect directly
         // rather than us handling it here, because they might format output differently or
@@ -236,14 +266,21 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         // signatures that don't take redirects, we'll temporarily handle redirects here for
         // the generic cases (echo, help, pwd, type) that previously had them inline.
 
-        if pipeline.background || builtins::registry::is_process_isolated(&name) {
-            let mut command = internal_command(&name, &args);
+        if pipeline.background
+            || builtins::registry::is_process_isolated(&name)
+            || isolated_wrapper.is_some()
+        {
+            let (launch_name, launch_args) = match isolated_wrapper {
+                Some(target) => target,
+                None => (name.as_str(), args.as_slice()),
+            };
+            let mut command = internal_command(launch_name, launch_args);
             command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
             if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
                 eprintln!("{}", error);
                 return (ExecutionResult::KeepRunning, 1);
             }
-            return execute_process(command, &name, pipeline, state);
+            return execute_process(command, launch_name, pipeline, state);
         }
 
         let run_generic =

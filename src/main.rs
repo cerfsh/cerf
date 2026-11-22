@@ -28,6 +28,7 @@ fn main() -> ExitCode {
         let mut state = ShellState::new();
         let code = match parser::parse_pipeline(input, &state.variables) {
             Some(entries) => engine::execute_list(entries, &mut state).1,
+            None if input.trim().is_empty() || input.trim_start().starts_with('#') => 0,
             None => 2,
         };
         return ExitCode::from(code as u8);

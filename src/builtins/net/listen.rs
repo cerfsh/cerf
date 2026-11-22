@@ -95,6 +95,9 @@ async fn listen_tcp(address: SocketAddr) -> Result<(), io::Error> {
     let listener = TcpListener::bind(address).await?;
     eprintln!("net.listen: listening on {}", listener.local_addr()?);
 
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
     loop {
         let (connection, peer) = match listener.accept().await {
             Ok(connection) => connection,
@@ -106,11 +109,9 @@ async fn listen_tcp(address: SocketAddr) -> Result<(), io::Error> {
         };
         eprintln!("net.listen: accepted {}", peer);
 
-        if let Err(error) =
-            stream::bridge_tcp(connection, tokio::io::stdin(), tokio::io::stdout()).await
-        {
-            if error.kind() == io::ErrorKind::BrokenPipe {
-                return Err(error);
+        if let Err(error) = stream::bridge_tcp(connection, &mut stdin, &mut stdout).await {
+            if error.is_inbound() && error.kind() == io::ErrorKind::BrokenPipe {
+                return Err(error.into());
             }
             eprintln!("net.listen: connection from {} failed: {}", peer, error);
         }

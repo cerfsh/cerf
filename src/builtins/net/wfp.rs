@@ -90,18 +90,28 @@ async fn wait_for_port(options: &WaitOptions) -> Result<(), String> {
     let mut last_error = format!("{}:{} is not reachable", options.host, options.port);
 
     loop {
-        if let Ok(addresses) = addr::resolve(&options.host, options.port).await {
-            for address in addresses {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            match tokio::time::timeout(remaining, addr::resolve(&options.host, options.port)).await
+            {
+                Ok(Ok(addresses)) => {
+                    for address in addresses {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        let attempt_timeout = remaining.min(ATTEMPT_TIMEOUT);
+                        match tokio::time::timeout(attempt_timeout, TcpStream::connect(address))
+                            .await
+                        {
+                            Ok(Ok(_)) => return Ok(()),
+                            Ok(Err(error)) => last_error = format!("{}: {}", address, error),
+                            Err(_) => last_error = format!("{}: connection timed out", address),
+                        }
+                    }
                 }
-                let attempt_timeout = remaining.min(ATTEMPT_TIMEOUT);
-                match tokio::time::timeout(attempt_timeout, TcpStream::connect(address)).await {
-                    Ok(Ok(_)) => return Ok(()),
-                    Ok(Err(error)) => last_error = format!("{}: {}", address, error),
-                    Err(_) => last_error = format!("{}: connection timed out", address),
-                }
+                Ok(Err(_)) => {}
+                Err(_) => last_error = format!("{}: resolution timed out", options.host),
             }
         }
 

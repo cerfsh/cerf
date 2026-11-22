@@ -13,6 +13,7 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TCP_CONNECTIONS: usize = 256;
 const MAX_UDP_SESSIONS: usize = 1024;
+const UDP_SESSION_QUEUE: usize = 64;
 const DATAGRAM_BUFFER: usize = 65_535;
 
 pub const COMMAND_INFO: crate::builtins::registry::CommandInfo =
@@ -159,7 +160,7 @@ async fn tunnel_tcp(options: &TunnelOptions) -> Result<(), io::Error> {
 
 struct UdpSession {
     id: usize,
-    sender: mpsc::UnboundedSender<Vec<u8>>,
+    sender: mpsc::Sender<Vec<u8>>,
 }
 
 async fn tunnel_udp(options: &TunnelOptions) -> Result<(), io::Error> {
@@ -184,7 +185,15 @@ async fn tunnel_udp(options: &TunnelOptions) -> Result<(), io::Error> {
                 let payload = buffer[..length].to_vec();
 
                 if let Some(session) = sessions.get(&peer) {
-                    let _ = session.sender.send(payload);
+                    if let Err(error) = session.sender.try_send(payload) {
+                        match error {
+                            mpsc::error::TrySendError::Full(_) => eprintln!(
+                                "net.tunnel: UDP session queue full; dropping datagram from {}",
+                                peer
+                            ),
+                            mpsc::error::TrySendError::Closed(_) => {}
+                        }
+                    }
                 } else if sessions.len() >= MAX_UDP_SESSIONS {
                     eprintln!("net.tunnel: UDP session limit reached; dropping datagram from {}", peer);
                 } else {
@@ -200,16 +209,22 @@ async fn tunnel_udp(options: &TunnelOptions) -> Result<(), io::Error> {
                     } else {
                         SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
                     };
-                    let upstream = UdpSocket::bind(bind_address).await?;
+                    let upstream = match UdpSocket::bind(bind_address).await {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            eprintln!("net.tunnel: {}: {}", peer, error);
+                            continue;
+                        }
+                    };
                     if let Err(error) = upstream.connect(target).await {
                         eprintln!("net.tunnel: {}: {}", peer, error);
                         continue;
                     }
 
-                    let (sender, receiver) = mpsc::unbounded_channel();
+                    let (sender, receiver) = mpsc::channel(UDP_SESSION_QUEUE);
                     let id = next_id;
                     next_id += 1;
-                    if sender.send(payload).is_err() {
+                    if sender.try_send(payload).is_err() {
                         continue;
                     }
                     sessions.insert(peer, UdpSession { id, sender });
@@ -245,7 +260,7 @@ async fn run_udp_session(
     local: Arc<UdpSocket>,
     upstream: UdpSocket,
     peer: SocketAddr,
-    mut receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut receiver: mpsc::Receiver<Vec<u8>>,
     idle_timeout: Duration,
 ) -> Result<(), io::Error> {
     let mut buffer = vec![0_u8; DATAGRAM_BUFFER];

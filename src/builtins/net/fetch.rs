@@ -109,23 +109,13 @@ fn run_fetch(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32)
         }
     };
 
-    let result =
-        runtime::block_on(
-            async move { tokio::time::timeout(REQUEST_TIMEOUT, fetch(options)).await },
-        );
+    let result = runtime::block_on(fetch(options));
 
     match result {
-        Ok(Ok(())) => (ExecutionResult::KeepRunning, 0),
-        Ok(Err(FetchError::BrokenPipe)) => (ExecutionResult::KeepRunning, 0),
-        Ok(Err(FetchError::Message(message))) => {
+        Ok(()) => (ExecutionResult::KeepRunning, 0),
+        Err(FetchError::BrokenPipe) => (ExecutionResult::KeepRunning, 0),
+        Err(FetchError::Message(message)) => {
             eprintln!("net.fetch: {}", message);
-            (ExecutionResult::KeepRunning, 1)
-        }
-        Err(_) => {
-            eprintln!(
-                "net.fetch: request timed out after {} seconds",
-                REQUEST_TIMEOUT.as_secs()
-            );
             (ExecutionResult::KeepRunning, 1)
         }
     }
@@ -133,10 +123,15 @@ fn run_fetch(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32)
 
 async fn fetch(options: FetchOptions) -> Result<(), FetchError> {
     let client = client::client().map_err(FetchError::Message)?;
-    let mut response =
-        client.get(options.url).send().await.map_err(|error| {
-            FetchError::message(format!("request failed: {}", error.without_url()))
-        })?;
+    let mut response = tokio::time::timeout(REQUEST_TIMEOUT, client.get(options.url).send())
+        .await
+        .map_err(|_| {
+            FetchError::message(format!(
+                "request timed out after {} seconds",
+                REQUEST_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|error| FetchError::message(format!("request failed: {}", error.without_url())))?;
 
     if !response.status().is_success() {
         return Err(FetchError::message(format!(
@@ -192,9 +187,21 @@ async fn copy_response<W: AsyncWrite + Unpin>(
     response: &mut Response,
     writer: &mut W,
 ) -> Result<(), FetchError> {
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        FetchError::message(format!("could not read response: {}", error.without_url()))
-    })? {
+    loop {
+        let chunk = match tokio::time::timeout(REQUEST_TIMEOUT, response.chunk()).await {
+            Ok(chunk) => chunk.map_err(|error| {
+                FetchError::message(format!("could not read response: {}", error.without_url()))
+            })?,
+            Err(_) => {
+                return Err(FetchError::message(format!(
+                    "response timed out after {} seconds",
+                    REQUEST_TIMEOUT.as_secs()
+                )));
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         writer.write_all(&chunk).await?;
     }
     Ok(())

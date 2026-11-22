@@ -76,11 +76,11 @@ pub fn get_mode_string(meta: &fs::Metadata) -> String {
     s
 }
 
-pub fn get_nlink(_meta: &fs::Metadata) -> u64 {
+pub fn get_nlink(meta: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        _meta.nlink()
+        meta.nlink()
     }
     #[cfg(windows)]
     {

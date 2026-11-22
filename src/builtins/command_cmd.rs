@@ -16,7 +16,7 @@ pub fn command_runner(args: &[String], state: &mut ShellState) -> (ExecutionResu
     let name = &args[0];
 
     if crate::builtins::registry::is_process_isolated(name) {
-        return crate::builtins::registry::run_isolated(name, &args[1..]);
+        return crate::builtins::registry::run_isolated(name, &args[1..], state);
     }
 
     if let Some(cmd_info) = crate::builtins::registry::find_command(name) {

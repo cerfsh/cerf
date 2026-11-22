@@ -1,6 +1,5 @@
 use crate::builtins;
 use crate::engine::{ExecutionResult, ShellState};
-use std::process::Command;
 
 pub type BuiltinRunner = fn(&[String], &mut ShellState) -> (ExecutionResult, i32);
 
@@ -95,19 +94,6 @@ pub fn is_process_isolated(name: &str) -> bool {
     )
 }
 
-pub fn run_isolated(name: &str, args: &[String]) -> (ExecutionResult, i32) {
-    let executable = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf"));
-    let status = Command::new(executable)
-        .arg("--internal-builtin")
-        .arg(name)
-        .args(args)
-        .status();
-
-    match status {
-        Ok(status) => (ExecutionResult::KeepRunning, status.code().unwrap_or(1)),
-        Err(error) => {
-            eprintln!("cerf: {}: {}", name, error);
-            (ExecutionResult::KeepRunning, 1)
-        }
-    }
+pub fn run_isolated(name: &str, args: &[String], state: &mut ShellState) -> (ExecutionResult, i32) {
+    crate::engine::execute_isolated(name, args, state)
 }
