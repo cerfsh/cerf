@@ -62,8 +62,38 @@ pub const BUILTINS: &[CommandInfo] = &[
     builtins::fs::stat::COMMAND_INFO,
     builtins::fs::du::COMMAND_INFO,
     builtins::fs::df::COMMAND_INFO,
+    builtins::net::dns::COMMAND_INFO,
+    builtins::net::fetch::COMMAND_INFO,
+    builtins::net::http::COMMAND_INFO,
+    builtins::net::ip::COMMAND_INFO,
+    builtins::net::listen::COMMAND_INFO,
+    builtins::net::socket::COMMAND_INFO,
+    builtins::net::tunnel::COMMAND_INFO,
+    builtins::net::wfp::COMMAND_INFO,
+    builtins::net::whoami::COMMAND_INFO,
 ];
 
 pub fn find_command(name: &str) -> Option<&'static CommandInfo> {
     BUILTINS.iter().find(|cmd| cmd.name == name)
+}
+
+/// Network commands need process isolation so they receive normal terminal
+/// signals and inherit the shell's redirection and job-control machinery.
+pub fn is_process_isolated(name: &str) -> bool {
+    matches!(
+        name,
+        "net.fetch"
+            | "net.wfp"
+            | "net.http"
+            | "net.listen"
+            | "net.whoami"
+            | "net.ip"
+            | "net.dns"
+            | "net.tunnel"
+            | "net.socket"
+    )
+}
+
+pub fn run_isolated(name: &str, args: &[String], state: &mut ShellState) -> (ExecutionResult, i32) {
+    crate::engine::execute_isolated(name, args, state)
 }

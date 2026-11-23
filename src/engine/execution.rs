@@ -13,6 +13,215 @@ use super::path::{expand_home, find_executable};
 use super::redirect::{open_stdin_redirect, open_stdout_redirect, resolve_redirects};
 use super::state::{ExecutionResult, ShellState, Variable};
 
+fn internal_command(name: &str, args: &[String]) -> Command {
+    let executable = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf"));
+    let mut command = Command::new(executable);
+    command.arg("--internal-builtin").arg(name).args(args);
+    command
+}
+
+pub(crate) fn execute_isolated(
+    name: &str,
+    args: &[String],
+    state: &mut ShellState,
+) -> (ExecutionResult, i32) {
+    let command = internal_command(name, args);
+    let cmd = crate::parser::SimpleCommand {
+        assignments: Vec::new(),
+        name: Some(name.to_string()),
+        args: args.iter().cloned().map(Arg::plain).collect(),
+        redirects: Vec::new(),
+    };
+    let pipeline = Pipeline {
+        commands: vec![crate::parser::CommandNode::Simple(cmd)],
+        negated: false,
+        background: false,
+    };
+    execute_process(command, name, &pipeline, state, None)
+}
+
+fn apply_command_io(
+    command: &mut Command,
+    cmd: &crate::parser::SimpleCommand,
+    pipeline: &Pipeline,
+    state: &ShellState,
+) -> Result<(), String> {
+    let (stdin_redir, stdout_redir) = resolve_redirects(&cmd.redirects);
+
+    if let Some(redir) = stdin_redir {
+        let mut expanded_redir = redir.clone();
+        expanded_redir.file = expand_vars(&redir.file, &state.variables);
+        command.stdin(Stdio::from(open_stdin_redirect(&expanded_redir)?));
+    } else if pipeline.background {
+        command.stdin(Stdio::null());
+    }
+
+    if let Some(redir) = stdout_redir {
+        let mut expanded_redir = redir.clone();
+        expanded_redir.file = expand_vars(&redir.file, &state.variables);
+        command.stdout(Stdio::from(open_stdout_redirect(&expanded_redir)?));
+    }
+
+    Ok(())
+}
+
+fn execute_process(
+    mut command: Command,
+    name: &str,
+    pipeline: &Pipeline,
+    state: &mut ShellState,
+    snapshot: Option<tempfile::TempPath>,
+) -> (ExecutionResult, i32) {
+    #[cfg(unix)]
+    let is_background = pipeline.background;
+
+    // Internal-builtin children (`--internal-builtin`) may already run in a
+    // background process group with default SIGTTOU handling, so they must not
+    // claim a new process group or call `tcsetpgrp` (which would stop them).
+    #[cfg(unix)]
+    let manage_job_control = !state.internal_builtin;
+
+    #[cfg(unix)]
+    let result = unsafe {
+        command
+            .pre_exec(move || {
+                let pid = nix::unistd::getpid();
+                // Background jobs always need their own process group so that
+                // job-control signalling (`kill %n`, `bg`, `fg`) targets a
+                // valid group, including from internal-builtin children.
+                // Foreground internal launches keep the ancestor's group.
+                if manage_job_control || is_background {
+                    let _ = nix::unistd::setpgid(pid, pid);
+                }
+                if manage_job_control && !is_background {
+                    let stdin = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDIN_FILENO);
+                    let stderr = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDERR_FILENO);
+                    let stdout = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDOUT_FILENO);
+                    let _ = nix::unistd::tcsetpgrp(stdin, pid)
+                        .or_else(|_| nix::unistd::tcsetpgrp(stderr, pid))
+                        .or_else(|_| nix::unistd::tcsetpgrp(stdout, pid));
+                }
+                signals::restore_default();
+                Ok(())
+            })
+            .spawn()
+    };
+
+    #[cfg(windows)]
+    let result = command.spawn();
+
+    let code = match result {
+        Ok(child) => {
+            if let Some(mut snapshot) = snapshot {
+                // The child can now read and remove the snapshot.
+                snapshot.disable_cleanup(true);
+            }
+            #[cfg(windows)]
+            let mut child = child;
+            let pid = child.id();
+
+            // Job-control-less children must not touch the terminal, which
+            // already belongs to an ancestor. Foreground ones are simply
+            // reaped; background ones fall through to job registration below
+            // so `job.wait` and `update_jobs` can still track and report them.
+            #[cfg(unix)]
+            if !manage_job_control && !pipeline.background {
+                let mut child = child;
+                let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
+                return (ExecutionResult::KeepRunning, code);
+            }
+
+            // Mirror the child's group setup; internal foreground launches keep
+            // the ancestor's group, while internal background jobs get their own.
+            #[cfg(unix)]
+            if state.shell_pgid.is_some() || (!manage_job_control && pipeline.background) {
+                let _ = nix::unistd::setpgid(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::unistd::Pid::from_raw(pid as i32),
+                );
+            }
+
+            #[cfg(windows)]
+            let job_handle = unsafe {
+                let handle = windows_sys::Win32::System::JobObjects::CreateJobObjectW(
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+                let mut limit_info: windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                if !pipeline.background {
+                    limit_info.BasicLimitInformation.LimitFlags =
+                        windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                }
+                windows_sys::Win32::System::JobObjects::SetInformationJobObject(
+                    handle,
+                    windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation,
+                    &limit_info as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of_val(&limit_info) as u32,
+                );
+                windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
+                    handle,
+                    std::os::windows::io::AsRawHandle::as_raw_handle(&child) as _,
+                );
+                windows_sys::Win32::System::IO::CreateIoCompletionPort(
+                    handle,
+                    state.iocp_handle as _,
+                    state.next_job_id as _,
+                    0,
+                );
+                handle as isize
+            };
+
+            let job = crate::engine::state::Job {
+                id: state.next_job_id,
+                pgid: pid,
+                #[cfg(windows)]
+                job_handle,
+                command: crate::engine::job_control::format_command(pipeline),
+                processes: vec![crate::engine::state::ProcessInfo {
+                    pid,
+                    name: name.to_string(),
+                    state: crate::engine::state::JobState::Running,
+                }],
+                reported_done: false,
+            };
+            let job_id = state.next_job_id;
+            state.jobs.insert(job_id, job);
+            state.next_job_id += 1;
+
+            if pipeline.background {
+                println!("[{}] {}", job_id, pid);
+                0
+            } else {
+                #[cfg(unix)]
+                {
+                    crate::engine::job_control::wait_for_job(job_id, state, true)
+                }
+                #[cfg(windows)]
+                {
+                    let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
+                    if let Some(job) = state.jobs.get_mut(&job_id) {
+                        for process in &mut job.processes {
+                            process.state = crate::engine::state::JobState::Done(code);
+                        }
+                    }
+                    state.jobs.remove(&job_id);
+                    code
+                }
+            }
+        }
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                eprintln!("cerf: command not found: {}", name);
+            } else {
+                eprintln!("cerf: error executing '{}': {}", name, error);
+            }
+            127
+        }
+    };
+
+    (ExecutionResult::KeepRunning, code)
+}
+
 // ── Single command (no pipe) ──────────────────────────────────────────────
 
 /// Execute one simple command with optional redirections.
@@ -72,6 +281,14 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
 
     let args = expand_globs(&expanded_args);
 
+    let isolated_wrapper = if matches!(name.as_str(), "sys.builtin" | "sys.command") {
+        args.first()
+            .filter(|target| builtins::registry::is_process_isolated(target.as_str()))
+            .map(|target| (target.as_str(), &args[1..]))
+    } else {
+        None
+    };
+
     if let Some(cmd_info) = builtins::registry::find_command(name.as_str()) {
         // Some builtins (like history, dirs) need access to the stdout redirect directly
         // rather than us handling it here, because they might format output differently or
@@ -79,119 +296,56 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         // signatures that don't take redirects, we'll temporarily handle redirects here for
         // the generic cases (echo, help, pwd, type) that previously had them inline.
 
-        if pipeline.background {
-            // Builtin in background -> spawn a subshell process for it.
-            // This is the simplest way to ensure it doesn't block the main shell.
-            let mut command = Command::new(
-                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf")),
-            );
-            command
-                .arg("-c")
-                .arg(crate::engine::job_control::format_command(pipeline));
-
-            // Redirects for subshell
-            if let Some(redir) = stdin_redir {
-                let mut expanded_redir = redir.clone();
-                expanded_redir.file = expand_vars(&redir.file, &state.variables);
-                if let Ok(f) = open_stdin_redirect(&expanded_redir) {
-                    command.stdin(Stdio::from(f));
+        if pipeline.background
+            || builtins::registry::is_process_isolated(&name)
+            || isolated_wrapper.is_some()
+        {
+            let (launch_name, launch_args) = match isolated_wrapper {
+                Some(target) => target,
+                None => (name.as_str(), args.as_slice()),
+            };
+            let mut command = internal_command(launch_name, launch_args);
+            command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
+            // Background builtins run in a child process, so hand them a
+            // launch-time copy of the variables and options.
+            let snapshot = if pipeline.background {
+                match state.write_snapshot(&cmd.assignments) {
+                    Ok(path) => {
+                        command.env(super::state::SNAPSHOT_ENV, path.as_os_str());
+                        Some(path)
+                    }
+                    Err(error) => {
+                        eprintln!("cerf: could not write state snapshot: {}", error);
+                        return (ExecutionResult::KeepRunning, 1);
+                    }
                 }
             } else {
-                command.stdin(Stdio::null());
+                None
+            };
+            if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
+                eprintln!("{}", error);
+                return (ExecutionResult::KeepRunning, 1);
             }
-            if let Some(redir) = stdout_redir {
-                let mut expanded_redir = redir.clone();
-                expanded_redir.file = expand_vars(&redir.file, &state.variables);
-                if let Ok(f) = open_stdout_redirect(&expanded_redir) {
-                    command.stdout(Stdio::from(f));
-                }
-            }
-
-            match command.spawn() {
-                Ok(child) => {
-                    let pid = child.id();
-                    let job_id = state.next_job_id;
-                    println!("[{}] {}", job_id, pid);
-
-                    #[cfg(windows)]
-                    let job_handle = unsafe {
-                        let handle = windows_sys::Win32::System::JobObjects::CreateJobObjectW(
-                            std::ptr::null(),
-                            std::ptr::null(),
-                        );
-                        windows_sys::Win32::System::IO::CreateIoCompletionPort(
-                            handle,
-                            state.iocp_handle as _,
-                            job_id as _,
-                            0,
-                        );
-                        windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
-                            handle,
-                            std::os::windows::io::AsRawHandle::as_raw_handle(&child) as _,
-                        );
-                        handle as isize
-                    };
-
-                    let job = crate::engine::state::Job {
-                        id: job_id,
-                        pgid: pid,
-                        #[cfg(windows)]
-                        job_handle,
-                        command: crate::engine::job_control::format_command(pipeline),
-                        processes: vec![crate::engine::state::ProcessInfo {
-                            pid,
-                            name: name.to_string(),
-                            state: crate::engine::state::JobState::Running,
-                        }],
-                        reported_done: false,
-                    };
-                    state.jobs.insert(job_id, job);
-                    state.next_job_id += 1;
-                    return (ExecutionResult::KeepRunning, 0);
-                }
-                Err(e) => {
-                    eprintln!("cerf: error backgrounding builtin: {}", e);
-                    return (ExecutionResult::KeepRunning, 1);
-                }
-            }
+            return execute_process(command, launch_name, pipeline, state, snapshot);
         }
 
         let run_generic =
             |state: &mut ShellState| -> (ExecutionResult, i32) { (cmd_info.run)(&args, state) };
 
         match name.as_str() {
-            "pushd" | "popd" | "dirs" | "history" => {
-                // These commands need to be updated to take redirects if we want them to handle them natively,
-                // but for now their specific runners don't take redirects in the `BuiltinRunner` signature.
-                // We will just let them print to stdout/stderr. If we need redirects, we capture them.
-                // Actually looking at their current COMMAND_INFO implementations, they just call the underlying runner.
-                // So we can just use run_generic() for now, but we'll lose redirect capability for them until their signature is updated.
-                // For now, let's just run them.
-                run_generic(state)
-            }
+            "pushd" | "popd" | "dirs" | "history" => run_generic(state),
             "pwd" | "help" | "echo" | "type" => {
-                // These commands previously had their redirect handling inline in `execute_simple`.
                 if let Some(redir) = stdout_redir {
                     match open_stdout_redirect(redir) {
-                        Ok(mut _f) => {
-                            // Temporarily redirect stdout.
-                            // A better approach is to change `BuiltinRunner` to take redirects.
-                            // But for now, we'll just run them and hope they don't break too badly.
-                            // Actually, let's just use `run_generic` and accept that redirects for these builtins
-                            // might not work perfectly without a signature change.
-
-                            // Let's implement a hacky wrapper for now:
-                            // We can't easily gag stdout in pure Rust without OS-specific dup2 calls.
-                            // Let's just run it. The `BuiltinRunner` signature needs to be updated in a future PR
-                            // to support `stdin` and `stdout` arguments.
+                        Ok(_) => {
                             eprintln!(
                                 "cerf: warning: redirecting output of builtin '{}' is currently unsupported via registry",
                                 name
                             );
                             run_generic(state)
                         }
-                        Err(e) => {
-                            eprintln!("{}", e);
+                        Err(error) => {
+                            eprintln!("{}", error);
                             (ExecutionResult::KeepRunning, 1)
                         }
                     }
@@ -200,8 +354,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
                 }
             }
             "read" => {
-                if let Some(_redir) = stdin_redir {
-                    // Similar issue for stdin
+                if stdin_redir.is_some() {
                     eprintln!(
                         "cerf: warning: redirecting input of builtin '{}' is currently unsupported via registry",
                         name
@@ -209,10 +362,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
                 }
                 run_generic(state)
             }
-            _ => {
-                // Other builtins don't typically use redirects directly in this simple runner context.
-                run_generic(state)
-            }
+            _ => run_generic(state),
         }
     } else {
         let resolved = find_executable(&name).unwrap_or_else(|| expand_home(&name));
@@ -236,155 +386,14 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         let mut command = Command::new(&resolved);
 
         command.args(&args);
-        command.envs(cmd.assignments.iter().map(|(k, v)| (k, v)));
+        command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
 
-        // Apply stdin redirect
-        if let Some(redir) = stdin_redir {
-            let mut expanded_redir = redir.clone();
-            expanded_redir.file = expand_vars(&redir.file, &state.variables);
-            match open_stdin_redirect(&expanded_redir) {
-                Ok(f) => {
-                    command.stdin(Stdio::from(f));
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                    return (ExecutionResult::KeepRunning, 1);
-                }
-            }
-        } else if pipeline.background {
-            command.stdin(Stdio::null());
+        if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
+            eprintln!("{}", error);
+            return (ExecutionResult::KeepRunning, 1);
         }
 
-        // Apply stdout redirect
-        if let Some(redir) = stdout_redir {
-            let mut expanded_redir = redir.clone();
-            expanded_redir.file = expand_vars(&redir.file, &state.variables);
-            match open_stdout_redirect(&expanded_redir) {
-                Ok(f) => {
-                    command.stdout(Stdio::from(f));
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                    return (ExecutionResult::KeepRunning, 1);
-                }
-            }
-        }
-
-        #[cfg(unix)]
-        let is_bg = pipeline.background;
-
-        #[cfg(unix)]
-        let result = unsafe {
-            command
-                .pre_exec(move || {
-                    let pid = nix::unistd::getpid();
-                    let _ = nix::unistd::setpgid(pid, pid);
-                    if !is_bg {
-                        let stdin = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDIN_FILENO);
-                        let stderr = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDERR_FILENO);
-                        let stdout = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDOUT_FILENO);
-                        let _ = nix::unistd::tcsetpgrp(stdin, pid)
-                            .or_else(|_| nix::unistd::tcsetpgrp(stderr, pid))
-                            .or_else(|_| nix::unistd::tcsetpgrp(stdout, pid));
-                    }
-                    signals::restore_default();
-                    Ok(())
-                })
-                .spawn()
-        };
-
-        #[cfg(windows)]
-        let result = command.spawn();
-
-        let code = match result {
-            Ok(mut child) => {
-                let pid = child.id();
-
-                #[cfg(unix)]
-                if state.shell_pgid.is_some() {
-                    let _ = nix::unistd::setpgid(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        nix::unistd::Pid::from_raw(pid as i32),
-                    );
-                }
-
-                #[cfg(windows)]
-                let job_handle = unsafe {
-                    let handle = windows_sys::Win32::System::JobObjects::CreateJobObjectW(
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
-                    let mut limit_info: windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                    if !pipeline.background {
-                        limit_info.BasicLimitInformation.LimitFlags = windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                    }
-                    windows_sys::Win32::System::JobObjects::SetInformationJobObject(
-                        handle,
-                        windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation,
-                        &limit_info as *const _ as *const std::ffi::c_void,
-                        std::mem::size_of_val(&limit_info) as u32,
-                    );
-                    windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
-                        handle,
-                        std::os::windows::io::AsRawHandle::as_raw_handle(&child) as _,
-                    );
-                    windows_sys::Win32::System::IO::CreateIoCompletionPort(
-                        handle,
-                        state.iocp_handle as _,
-                        state.next_job_id as _,
-                        0,
-                    );
-                    handle as isize
-                };
-
-                let job = crate::engine::state::Job {
-                    id: state.next_job_id,
-                    pgid: pid,
-                    #[cfg(windows)]
-                    job_handle,
-                    command: crate::engine::job_control::format_command(pipeline),
-                    processes: vec![crate::engine::state::ProcessInfo {
-                        pid,
-                        name: name.to_string(),
-                        state: crate::engine::state::JobState::Running,
-                    }],
-                    reported_done: false,
-                };
-                let job_id = state.next_job_id;
-                state.jobs.insert(job_id, job);
-                state.next_job_id += 1;
-
-                if pipeline.background {
-                    println!("[{}] {}", job_id, pid);
-                    0
-                } else {
-                    #[cfg(unix)]
-                    {
-                        crate::engine::job_control::wait_for_job(job_id, state, true)
-                    }
-                    #[cfg(windows)]
-                    {
-                        let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
-                        if let Some(job) = state.jobs.get_mut(&job_id) {
-                            for p in &mut job.processes {
-                                p.state = crate::engine::state::JobState::Done(code);
-                            }
-                        }
-                        state.jobs.remove(&job_id);
-                        code
-                    }
-                }
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!("cerf: command not found: {}", name);
-                } else {
-                    eprintln!("cerf: error executing '{}': {}", name, e);
-                }
-                127
-            }
-        };
-        (ExecutionResult::KeepRunning, code)
+        execute_process(command, &name, pipeline, state, None)
     }
 }
 
@@ -434,14 +443,13 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                         break;
                     }
                 }
-                if !executed
-                    && let Some(body) = else_branch {
-                        let (res, body_code) = execute_list(body.clone(), state);
-                        if !matches!(res, ExecutionResult::KeepRunning) {
-                            return (res, body_code);
-                        }
-                        final_code = body_code;
+                if !executed && let Some(body) = else_branch {
+                    let (res, body_code) = execute_list(body.clone(), state);
+                    if !matches!(res, ExecutionResult::KeepRunning) {
+                        return (res, body_code);
                     }
+                    final_code = body_code;
+                }
                 let code = if pipeline.negated {
                     if final_code == 0 { 1 } else { 0 }
                 } else {
@@ -645,37 +653,31 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
         let args = expand_globs(cmd.args());
 
         #[cfg(windows)]
-        let mut command = {
-            if is_builtin {
-                let mut c = Command::new(&resolved);
-                c.arg("-c").arg(crate::engine::job_control::format_node_full(cmd));
-                c
+        let mut command = if is_builtin {
+            internal_command(name, &args)
+        } else {
+            let is_batch = resolved.extension().is_some_and(|e| {
+                let e = e.to_string_lossy().to_lowercase();
+                e == "cmd" || e == "bat"
+            });
+            let mut command = if is_batch {
+                let mut command = Command::new("cmd");
+                command.arg("/c").arg(&resolved);
+                command
             } else {
-                let is_batch = resolved.extension().is_some_and(|e| {
-                    let e = e.to_string_lossy().to_lowercase();
-                    e == "cmd" || e == "bat"
-                });
-                let mut c = if is_batch {
-                    let mut c = Command::new("cmd");
-                    c.arg("/c").arg(&resolved);
-                    c
-                } else {
-                    Command::new(&resolved)
-                };
-                c.args(&args);
-                c
-            }
+                Command::new(&resolved)
+            };
+            command.args(&args);
+            command
         };
 
         #[cfg(unix)]
-        let mut command = {
-            let mut c = Command::new(&resolved);
-            if is_builtin {
-                c.arg("-c").arg(crate::engine::job_control::format_node_full(cmd));
-            } else {
-                c.args(&args);
-            }
-            c
+        let mut command = if is_builtin {
+            internal_command(name, &args)
+        } else {
+            let mut command = Command::new(&resolved);
+            command.args(&args);
+            command
         };
 
         command.envs(cmd.assignments().iter().map(|(k, v)| (k, v)));
@@ -883,6 +885,11 @@ pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (Exec
         }
 
         let (result, code) = execute(&entry.pipeline, state);
+        // Internal builtin processes have no interactive loop to poll children.
+        #[cfg(unix)]
+        if state.internal_builtin {
+            crate::engine::job_control::update_jobs(state);
+        }
         last_code = code;
 
         if let ExecutionResult::Exit = result {

@@ -4,7 +4,9 @@ mod expand;
 
 // Re-export the public surface so that `crate::parser::*` keeps working
 // for all existing callers (engine.rs, main.rs, etc.).
-pub use ast::{Arg, CommandEntry, CommandNode, Connector, Pipeline, Redirect, RedirectKind};
+pub use ast::{
+    Arg, CommandEntry, CommandNode, Connector, Pipeline, Redirect, RedirectKind, SimpleCommand,
+};
 pub use combinators::is_reserved_word;
 pub use expand::expand_vars;
 
@@ -91,6 +93,31 @@ pub fn is_incomplete(input: &str) -> bool {
     depth > 0
 }
 
+/// True when every line is blank or a `#` comment. Used to distinguish
+/// comment-only input from a real parse failure.
+pub fn is_blank_or_comment_only(input: &str) -> bool {
+    input
+        .lines()
+        .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+}
+
+/// Drop leading blank and comment-only lines, leaving the first line that
+/// should be parsed.
+fn skip_leading_comments(input: &str) -> &str {
+    let mut rest = input;
+    loop {
+        let line_end = rest.find('\n').map_or(rest.len(), |i| i + 1);
+        let line = rest[..line_end].trim();
+        if !line.is_empty() && !line.starts_with('#') {
+            return rest;
+        }
+        if line_end == rest.len() {
+            return "";
+        }
+        rest = &rest[line_end..];
+    }
+}
+
 /// Parse an entire input line into a list of [`CommandEntry`] items.
 ///
 /// Returns `None` if the line is empty or a comment.
@@ -101,8 +128,8 @@ pub fn parse_input(
 ) -> Option<Vec<CommandEntry>> {
     let preprocessed = join_continuations(input);
     let expanded = expand_vars(&preprocessed, shell_vars);
-    let s = expanded.trim();
-    if s.is_empty() || s.starts_with('#') {
+    let s = skip_leading_comments(&expanded).trim();
+    if s.is_empty() {
         return None;
     }
 
@@ -197,6 +224,19 @@ mod tests {
     fn test_comment() {
         assert!(parse_line("# comment").is_none());
         assert!(parse_line("   # comment indented").is_none());
+        assert!(is_blank_or_comment_only("# one\n   # two\n"));
+        assert!(!is_blank_or_comment_only("# comment\necho hi"));
+    }
+
+    #[test]
+    fn test_leading_comment_lines_are_skipped() {
+        let vars = std::collections::HashMap::new();
+        let entries = parse_pipeline("# leading\n\necho hi", &vars).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].pipeline.commands[0].name().map(|n| n.as_str()),
+            Some("echo")
+        );
     }
 
     // ── connector / pipeline tests ────────────────────────────────────────
