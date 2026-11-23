@@ -268,7 +268,7 @@ fn expand_prompt(prompt: &str) -> String {
     }
 
     if result.contains("\\h") {
-        let host = sysinfo::System::host_name().unwrap_or_else(|| "localhost".to_string());
+        let host = sysinfo::System::host_name().unwrap_or_else(|_| "localhost".to_string());
         let short_host = host.split('.').next().unwrap_or("localhost");
         result = result.replace("\\h", short_host);
     }

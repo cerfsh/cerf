@@ -11,7 +11,13 @@ pub const COMMAND_INFO: CommandInfo = CommandInfo {
 };
 
 pub fn runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
-    let disks = Disks::new_with_refreshed_list();
+    let disks = match Disks::new_with_refreshed_list() {
+        Ok(disks) => disks,
+        Err(error) => {
+            eprintln!("fs.df: {}", error);
+            return (ExecutionResult::KeepRunning, 1);
+        }
+    };
     println!(
         "{:<20} {:<10} {:<10} {:<10} {:<5} Mounted on",
         "Filesystem", "Size", "Used", "Avail", "Use%"

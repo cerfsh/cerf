@@ -37,7 +37,9 @@ fn route_primary(ipv6: bool) -> Option<IpAddr> {
 }
 
 fn local_interfaces() -> Vec<InterfaceInfo> {
-    let networks = Networks::new_with_refreshed_list();
+    let Ok(networks) = Networks::new_with_refreshed_list() else {
+        return Vec::new();
+    };
     let mut interfaces = BTreeMap::new();
 
     for (name, data) in &networks {
@@ -49,7 +51,7 @@ fn local_interfaces() -> Vec<InterfaceInfo> {
         addresses.sort();
         addresses.dedup();
         if !addresses.is_empty() {
-            interfaces.insert(name.clone(), addresses);
+            interfaces.insert(name.to_string_lossy().into_owned(), addresses);
         }
     }
 

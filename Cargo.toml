@@ -17,13 +17,13 @@ dirs = "7.0.0"
 glob = "0.3"
 nom = "8.0.0"
 rustyline = "19"
-sysinfo = "0.38"
+sysinfo = "0.40"
 jwalk = "0.9.0"
 chrono = "0.4.39"
 reqwest = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs"] }
 url = "2.5.8"
 hickory-resolver = "0.25"
 
