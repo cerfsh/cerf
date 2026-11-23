@@ -261,12 +261,17 @@ fn background_command_inside_isolated_builtin_is_registered() {
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let registrations = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("[1] "))
+        .filter(|rest| {
+            rest.split_whitespace()
+                .next()
+                .is_some_and(|pid| pid.parse::<u32>().is_ok())
+        })
+        .count();
     assert_eq!(
-        stdout
-            .lines()
-            .filter(|line| line.starts_with("[1] "))
-            .count(),
-        2,
+        registrations, 2,
         "both the outer shell and the isolated builtin should register a background job; stdout was {stdout:?}"
     );
 }

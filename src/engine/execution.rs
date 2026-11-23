@@ -85,17 +85,21 @@ fn execute_process(
     let result = unsafe {
         command
             .pre_exec(move || {
-                if manage_job_control {
-                    let pid = nix::unistd::getpid();
+                let pid = nix::unistd::getpid();
+                // Background jobs always need their own process group so that
+                // job-control signalling (`kill %n`, `bg`, `fg`) targets a
+                // valid group, including from internal-builtin children.
+                // Foreground internal launches keep the ancestor's group.
+                if manage_job_control || is_background {
                     let _ = nix::unistd::setpgid(pid, pid);
-                    if !is_background {
-                        let stdin = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDIN_FILENO);
-                        let stderr = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDERR_FILENO);
-                        let stdout = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDOUT_FILENO);
-                        let _ = nix::unistd::tcsetpgrp(stdin, pid)
-                            .or_else(|_| nix::unistd::tcsetpgrp(stderr, pid))
-                            .or_else(|_| nix::unistd::tcsetpgrp(stdout, pid));
-                    }
+                }
+                if manage_job_control && !is_background {
+                    let stdin = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDIN_FILENO);
+                    let stderr = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDERR_FILENO);
+                    let stdout = std::os::fd::BorrowedFd::borrow_raw(nix::libc::STDOUT_FILENO);
+                    let _ = nix::unistd::tcsetpgrp(stdin, pid)
+                        .or_else(|_| nix::unistd::tcsetpgrp(stderr, pid))
+                        .or_else(|_| nix::unistd::tcsetpgrp(stdout, pid));
                 }
                 signals::restore_default();
                 Ok(())
@@ -127,8 +131,10 @@ fn execute_process(
                 return (ExecutionResult::KeepRunning, code);
             }
 
+            // Mirror the child's group setup; internal foreground launches keep
+            // the ancestor's group, while internal background jobs get their own.
             #[cfg(unix)]
-            if state.shell_pgid.is_some() {
+            if state.shell_pgid.is_some() || (!manage_job_control && pipeline.background) {
                 let _ = nix::unistd::setpgid(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::unistd::Pid::from_raw(pid as i32),
