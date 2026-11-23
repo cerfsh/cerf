@@ -173,13 +173,13 @@ fn execute_process(
 
             let job = crate::engine::state::Job {
                 id: state.next_job_id,
+                #[cfg(unix)]
                 pgid: pid,
                 #[cfg(windows)]
                 job_handle,
                 command: crate::engine::job_control::format_command(pipeline),
                 processes: vec![crate::engine::state::ProcessInfo {
                     pid,
-                    name: name.to_string(),
                     state: crate::engine::state::JobState::Running,
                 }],
                 reported_done: false,
@@ -786,7 +786,6 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
 
                 processes.push(crate::engine::state::ProcessInfo {
                     pid,
-                    name: name.to_string(),
                     state: crate::engine::state::JobState::Running,
                 });
 
@@ -812,6 +811,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
 
     let job = crate::engine::state::Job {
         id: state.next_job_id,
+        #[cfg(unix)]
         pgid: first_pgid,
         #[cfg(windows)]
         job_handle,
@@ -863,9 +863,9 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
 /// Semantics follow POSIX sh:
 /// - **`;`**  — always run the next pipeline regardless of the previous exit code.
 /// - **`&&`** — run the next pipeline only if the previous returned exit
-///              code `0` (success).
+///   code `0` (success).
 /// - **`||`** — run the next pipeline only if the previous returned a
-///              non-zero exit code (failure).
+///   non-zero exit code (failure).
 pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (ExecutionResult, i32) {
     let mut last_code: i32 = 0;
 
@@ -960,13 +960,13 @@ fn execute_block_with_redirects(
 
                 let job = crate::engine::state::Job {
                     id: job_id,
+                    #[cfg(unix)]
                     pgid: pid,
                     #[cfg(windows)]
                     job_handle,
                     command: crate::engine::job_control::format_command(pipeline),
                     processes: vec![crate::engine::state::ProcessInfo {
                         pid,
-                        name: "block".to_string(),
                         state: crate::engine::state::JobState::Running,
                     }],
                     reported_done: false,

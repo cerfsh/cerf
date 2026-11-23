@@ -15,13 +15,13 @@ pub fn umask_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResul
             let mask = unsafe { nix::libc::umask(0) };
             unsafe { nix::libc::umask(mask) };
             println!("{:04o}", mask);
-            return (ExecutionResult::KeepRunning, 0);
+            (ExecutionResult::KeepRunning, 0)
         } else if let Ok(val) = u32::from_str_radix(&args[0], 8) {
             unsafe { nix::libc::umask(val as _) };
-            return (ExecutionResult::KeepRunning, 0);
+            (ExecutionResult::KeepRunning, 0)
         } else {
             eprintln!("cerf: umask: {}: octal number required", args[0]);
-            return (ExecutionResult::KeepRunning, 1);
+            (ExecutionResult::KeepRunning, 1)
         }
     }
 

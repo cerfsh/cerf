@@ -58,16 +58,13 @@ pub fn parse_arg(input: &str) -> IResult<&str, Arg> {
     let first_quoted = first.1;
 
     // Greedily consume further adjacent segments (no whitespace between them).
-    loop {
-        match alt((parse_double_quoted, parse_single_quoted, parse_unquoted)).parse(rest) {
-            Ok((after, segment)) => {
-                value.push_str(&segment.0);
-                segment_count += 1;
-                // If any later segment differs in quote-state, it's mixed.
-                rest = after;
-            }
-            Err(_) => break,
-        }
+    while let Ok((after, segment)) =
+        alt((parse_double_quoted, parse_single_quoted, parse_unquoted)).parse(rest)
+    {
+        value.push_str(&segment.0);
+        segment_count += 1;
+        // If any later segment differs in quote-state, it's mixed.
+        rest = after;
     }
 
     // The word is considered "fully quoted" only when it is exactly one
@@ -137,14 +134,10 @@ pub fn parse_simple_command(input: &str) -> IResult<&str, SimpleCommand> {
     let mut assignments: Vec<(String, String)> = Vec::new();
 
     // Parse zero or more assignments first.
-    loop {
-        if let Ok((after_assign, assign)) = parse_assignment(rest) {
-            assignments.push(assign);
-            let (after_space, _) = space0(after_assign)?;
-            rest = after_space;
-        } else {
-            break;
-        }
+    while let Ok((after_assign, assign)) = parse_assignment(rest) {
+        assignments.push(assign);
+        let (after_space, _) = space0(after_assign)?;
+        rest = after_space;
     }
 
     // Parse the command name (optional if assignments are present).

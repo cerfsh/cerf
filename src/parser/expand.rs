@@ -3,7 +3,7 @@
 /// Substitution rules (mirrors POSIX sh behaviour):
 /// - `$$`        → a literal `$`
 /// - `$VAR`      → the value of the variable `VAR`
-///                 (identifier chars: ASCII alphanumeric + `_`)
+///   (identifier chars: ASCII alphanumeric + `_`)
 /// - `${VAR}`    → same, with brace delimiters
 /// - Bare `$` with no following identifier or `{` → kept as-is
 pub fn expand_vars(

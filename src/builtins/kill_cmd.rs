@@ -58,18 +58,14 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
             #[cfg(unix)]
             {
                 let s = &args[i][1..];
-                if s == "9" {
-                    sig = nix::sys::signal::Signal::SIGKILL;
-                } else if s == "KILL" {
+                if s == "9" || s == "KILL" {
                     sig = nix::sys::signal::Signal::SIGKILL;
                 }
             }
             #[cfg(windows)]
             {
                 let s = &args[i][1..];
-                if s == "9" {
-                    sig = 9;
-                } else if s == "KILL" {
+                if s == "9" || s == "KILL" {
                     sig = 9;
                 }
             }

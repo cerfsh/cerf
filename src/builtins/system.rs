@@ -83,7 +83,7 @@ pub fn exec(args: &[String]) -> Result<i32, String> {
         // Restore default signal handling before exec-ing.
         let err = Command::new(&resolved).args(cmd_args).exec(); // never returns on success
 
-        return Err(format!("cerf: exec: {}: {}", cmd_name, err));
+        Err(format!("cerf: exec: {}: {}", cmd_name, err))
     }
 
     // ── Windows: spawn + exit (best-effort emulation) ────────────────

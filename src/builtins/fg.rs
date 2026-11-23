@@ -42,7 +42,7 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
                     nix::sys::signal::Signal::SIGCONT,
                 );
                 crate::engine::job_control::set_current_job(state, id);
-                return crate::engine::job_control::wait_for_job(id, state, true);
+                crate::engine::job_control::wait_for_job(id, state, true)
             }
             #[cfg(windows)]
             {

@@ -24,6 +24,7 @@ impl Arg {
 }
 
 /// Helper: extract just the string values from a slice of `Arg`s.
+#[cfg(test)]
 pub fn arg_values(args: &[Arg]) -> Vec<&str> {
     args.iter().map(|a| a.value.as_str()).collect()
 }
@@ -68,16 +69,10 @@ pub enum CommandNode {
 }
 
 impl CommandNode {
+    #[cfg(test)]
     pub fn name(&self) -> Option<&String> {
         match self {
             Self::Simple(s) => s.name.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn name_mut(&mut self) -> Option<&mut String> {
-        match self {
-            Self::Simple(s) => s.name.as_mut(),
             _ => None,
         }
     }
@@ -86,13 +81,6 @@ impl CommandNode {
         match self {
             Self::Simple(s) => &s.args,
             _ => &[],
-        }
-    }
-
-    pub fn args_mut(&mut self) -> Option<&mut Vec<Arg>> {
-        match self {
-            Self::Simple(s) => Some(&mut s.args),
-            _ => None,
         }
     }
 

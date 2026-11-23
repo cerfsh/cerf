@@ -160,10 +160,12 @@ pub fn parse_pipeline(
     parse_input(input, shell_vars)
 }
 
+#[cfg(test)]
 pub fn parse_line(input: &str) -> Option<CommandNode> {
     parse_line_with_vars(input, &std::collections::HashMap::new())
 }
 
+#[cfg(test)]
 pub fn parse_line_with_vars(
     input: &str,
     vars: &std::collections::HashMap<String, crate::engine::state::Variable>,

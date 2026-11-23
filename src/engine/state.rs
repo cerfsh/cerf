@@ -22,13 +22,13 @@ impl std::fmt::Display for JobState {
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: u32,
-    pub name: String,
     pub state: JobState,
 }
 
 #[derive(Debug, Clone)]
 pub struct Job {
     pub id: usize,
+    #[cfg(unix)]
     pub pgid: u32,
     #[cfg(windows)]
     pub job_handle: isize,
@@ -260,28 +260,9 @@ impl ShellState {
         self.variables.get(name)
     }
 
-    pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Variable> {
-        for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                return scope.get_mut(name);
-            }
-        }
-        self.variables.get_mut(name)
-    }
-
     /// Get a variable's string value.
     pub fn get_var_string(&self, name: &str) -> Option<String> {
         self.get_var(name).map(|v| v.value.as_string())
-    }
-
-    /// Push a new local scope.
-    pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-    }
-
-    /// Pop the current local scope.
-    pub fn pop_scope(&mut self) {
-        self.scopes.pop();
     }
 
     /// Load history entries from `~/.cerf_history` (if it exists).
@@ -458,8 +439,7 @@ fn init_env_vars() -> HashMap<String, String> {
         }
         #[cfg(not(windows))]
         {
-            let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-            return user;
+            std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
         }
     }
     // 1. Ensure HOME is set

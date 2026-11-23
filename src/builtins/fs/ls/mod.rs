@@ -236,7 +236,7 @@ mod tests {
         let mut stderr = Cursor::new(Vec::new());
 
         let args = vec![dir.path().to_string_lossy().into_owned()];
-        let (res, code) = runner_inner(&args, &mut state, &mut stdout, &mut stderr);
+        let (_, code) = runner_inner(&args, &mut state, &mut stdout, &mut stderr);
 
         assert_eq!(code, 0);
         let output = String::from_utf8(stdout.into_inner()).unwrap();

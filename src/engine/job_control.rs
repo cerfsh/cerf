@@ -16,9 +16,6 @@ pub fn restore_terminal(state: &ShellState) {
     }
 }
 
-#[cfg(windows)]
-pub fn restore_terminal(_state: &ShellState) {}
-
 /// Wait for a specific job. If it is in foreground, also give it the terminal.
 #[cfg(unix)]
 pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
@@ -39,14 +36,7 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
         }
     }
 
-    loop {
-        let job = match state.jobs.get_mut(&job_id) {
-            Some(j) => j,
-            None => break,
-        };
-
-        let pgid = job.pgid;
-
+    while let Some(job) = state.jobs.get_mut(&job_id) {
         if job.is_stopped() {
             if fg {
                 println!("\n[{}] Stopped  {}", job.id, job.command);
@@ -76,12 +66,11 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
             Ok(WaitStatus::Signaled(pid, sig, _)) => {
                 let code = 128 + sig as i32;
                 update_pid_state(state, pid.as_raw() as u32, JobState::Done(code));
-                if fg {
-                    if let Some(job) = state.jobs.get(&job_id) {
-                        if job.processes.iter().any(|p| p.pid == pid.as_raw() as u32) {
-                            println!("\n[{}] Terminated  {}", job_id, sig);
-                        }
-                    }
+                if fg
+                    && let Some(job) = state.jobs.get(&job_id)
+                    && job.processes.iter().any(|p| p.pid == pid.as_raw() as u32)
+                {
+                    println!("\n[{}] Terminated  {}", job_id, sig);
                 }
             }
             Ok(WaitStatus::Stopped(pid, _sig)) => {
@@ -119,12 +108,7 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
         crate::FG_JOB.store(job_id, std::sync::atomic::Ordering::Relaxed);
     }
 
-    loop {
-        let job = match state.jobs.get_mut(&job_id) {
-            Some(j) => j,
-            None => break,
-        };
-
+    while let Some(job) = state.jobs.get_mut(&job_id) {
         if job.is_stopped() {
             if fg {
                 println!("\n[{}] Stopped  {}", job.id, job.command);

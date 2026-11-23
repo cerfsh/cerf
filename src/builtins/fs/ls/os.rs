@@ -76,6 +76,7 @@ pub fn get_mode_string(meta: &fs::Metadata) -> String {
     s
 }
 
+#[allow(unused_variables)]
 pub fn get_nlink(meta: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {

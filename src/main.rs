@@ -139,8 +139,8 @@ fn main() -> ExitCode {
                 let trimmed = line.trim_end();
 
                 // Explicit comma continuation (kept for backwards compat).
-                if trimmed.ends_with(',') {
-                    input_buffer.push_str(&trimmed[..trimmed.len() - 1]);
+                if let Some(stripped) = trimmed.strip_suffix(',') {
+                    input_buffer.push_str(stripped);
                     continue;
                 }
 
@@ -276,16 +276,15 @@ fn expand_prompt(prompt: &str) -> String {
     if result.contains("\\w") {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let mut cwd_str = cwd.display().to_string();
-        if let Some(home) = dirs::home_dir() {
-            if cwd.starts_with(&home) {
-                if let Ok(relative) = cwd.strip_prefix(&home) {
-                    cwd_str = if relative.as_os_str().is_empty() {
-                        "~".to_string()
-                    } else {
-                        format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display())
-                    };
-                }
-            }
+        if let Some(home) = dirs::home_dir()
+            && cwd.starts_with(&home)
+            && let Ok(relative) = cwd.strip_prefix(&home)
+        {
+            cwd_str = if relative.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display())
+            };
         }
         result = result.replace("\\w", &cwd_str);
     }
