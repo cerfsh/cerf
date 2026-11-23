@@ -170,17 +170,16 @@ fn parse_primary(args: &[&str], pos: &mut usize) -> Result<bool, String> {
 
     // ── Binary tests: STR1 OP STR2 ──────────────────────────────────
     // Look ahead: if args[pos+1] is a binary operator, this is a binary test.
-    if *pos + 2 <= args.len()
-        && *pos + 1 < args.len() && is_binary_op(args[*pos + 1]) {
-            let lhs = args[*pos];
-            let op = args[*pos + 1];
-            if *pos + 2 >= args.len() {
-                return Err(format!("expected argument after `{}`", op));
-            }
-            let rhs = args[*pos + 2];
-            *pos += 3;
-            return eval_binary(lhs, op, rhs);
+    if *pos + 2 <= args.len() && *pos + 1 < args.len() && is_binary_op(args[*pos + 1]) {
+        let lhs = args[*pos];
+        let op = args[*pos + 1];
+        if *pos + 2 >= args.len() {
+            return Err(format!("expected argument after `{}`", op));
         }
+        let rhs = args[*pos + 2];
+        *pos += 3;
+        return eval_binary(lhs, op, rhs);
+    }
 
     // ── Bare string: non-empty → true ────────────────────────────────
     *pos += 1;

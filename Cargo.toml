@@ -5,11 +5,10 @@ version = "0.2.0"
 description = "A shell."
 edition = "2024"
 repository = "https://github.com/cerfsh/cerf"
-homepage = "https://github.com/cerfsh/cerf"
 license = "Apache-2.0"
 keywords = ["cerf", "shell", "codetease", "terminal", "command-line"]
 categories = ["command-line-utilities"]
-rust-version = "1.93.1"
+rust-version = "1.100.0"
 include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 
 [dependencies]

@@ -32,12 +32,13 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
         let mut total_size = 0;
         for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file()
-                && let Ok(meta) = entry.metadata() {
-                    let size = meta.len();
-                    total_size += size;
-                    // Streaming: print each file size
-                    println!("{}\t{}", size.div_ceil(1024), entry.path().display());
-                }
+                && let Ok(meta) = entry.metadata()
+            {
+                let size = meta.len();
+                total_size += size;
+                // Streaming: print each file size
+                println!("{}\t{}", size.div_ceil(1024), entry.path().display());
+            }
         }
         println!("{}\ttotal", total_size.div_ceil(1024));
     }

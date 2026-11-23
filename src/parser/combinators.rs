@@ -177,9 +177,10 @@ pub fn parse_simple_command(input: &str) -> IResult<&str, SimpleCommand> {
     loop {
         // Check if the next word is a brace
         if let Ok((r2, _)) = space0::<_, nom::error::Error<&str>>(rest)
-            && (r2.starts_with('{') || r2.starts_with('}')) {
-                break;
-            }
+            && (r2.starts_with('{') || r2.starts_with('}'))
+        {
+            break;
+        }
 
         // Try redirects first (they start with > or <)
         if let Ok((after_redir, redir)) = parse_redirect(rest) {
@@ -304,10 +305,11 @@ fn parse_for_command(input: &str) -> IResult<&str, CommandNode> {
     let mut items = Vec::new();
     loop {
         if let Ok((r, _)) = multispace0::<_, nom::error::Error<&str>>(rest)
-            && r.starts_with('{') {
-                rest = r;
-                break;
-            }
+            && r.starts_with('{')
+        {
+            rest = r;
+            break;
+        }
 
         match parse_arg(rest) {
             Ok((after_arg, arg)) => {
