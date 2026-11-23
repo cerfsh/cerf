@@ -234,8 +234,39 @@ fn internal_builtin_waits_only_for_foreground_processes() {
         .expect("run cerf");
 
     assert_eq!(output.status.code(), Some(7));
+    // Background jobs are registered in job-control-less children now, so
+    // ignore their `[1] ...` job lines when checking the command output.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let messages: Vec<_> = stdout
+        .lines()
+        .filter(|line| !line.starts_with("[1] "))
+        .collect();
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "foreground\nbackground\n"
+        messages,
+        ["foreground", "background"],
+        "stdout was {stdout:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn background_command_inside_isolated_builtin_is_registered() {
+    // `sys.eval` runs isolated; the `test.true &` it evaluates must be
+    // registered as a job in the isolated child (printing `[1] pid`) and
+    // return asynchronously, not be silently reaped in the foreground.
+    let output = cerf()
+        .args(["-c", "sys.eval 'test.true &' &"])
+        .output()
+        .expect("run cerf");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("[1] "))
+            .count(),
+        2,
+        "both the outer shell and the isolated builtin should register a background job; stdout was {stdout:?}"
     );
 }

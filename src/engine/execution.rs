@@ -116,14 +116,12 @@ fn execute_process(
             let mut child = child;
             let pid = child.id();
 
-            // Job-control-less children are not registered as jobs and are
-            // simply reaped; the terminal already belongs to an ancestor.
+            // Job-control-less children must not touch the terminal, which
+            // already belongs to an ancestor. Foreground ones are simply
+            // reaped; background ones fall through to job registration below
+            // so `job.wait` and `update_jobs` can still track and report them.
             #[cfg(unix)]
-            if !manage_job_control {
-                if pipeline.background {
-                    // The nonblocking job poll also reaps untracked children.
-                    return (ExecutionResult::KeepRunning, 0);
-                }
+            if !manage_job_control && !pipeline.background {
                 let mut child = child;
                 let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
                 return (ExecutionResult::KeepRunning, code);
