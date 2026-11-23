@@ -83,13 +83,11 @@ scoop install {{scoop_bucket_name}}/{{bin}}
 ```
 [/IF]
 
-[IF crate.crates_io]
 ## Rust (Cargo)
 You can install the package directly from `crates.io`:
 ```bash
-cargo install {{bin}}
+cargo install cerf
 ```
-[/IF]
 
 [IF crate.cloudsmith]
 ## Rust (Cargo - Cloudsmith)
