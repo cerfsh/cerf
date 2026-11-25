@@ -1,6 +1,6 @@
 [metadata]
 bin = "cerf"
-version = "0.3.0"
+version = "0.3.1"
 repository = "https://github.com/cerfsh/cerf"
 toolchain = "1.100.0"
 

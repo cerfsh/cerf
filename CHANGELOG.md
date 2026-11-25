@@ -14,6 +14,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-25
+
+The correctness release: variable expansion, redirects, job control, and globbing
+now behave the way the shell language describes.
+
+### Changed
+
+- CI skips runs for documentation-only and release-only changes.
+
 ### Fixed
 
 - Variables are expanded when a command runs instead of when it is parsed, so loop
@@ -51,6 +60,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `fs.cp` refuses to copy a file onto itself (directly, through a hard link, or
   through a symlink) instead of truncating it to zero bytes and reporting success.
 - `fs.rm` refuses `.`, `..`, and the filesystem root before deleting anything.
+- Redirected builtins run in-process on Windows by swapping the standard handles and
+  restoring them afterwards, so `echo hi > out.txt` keeps shell state instead of
+  forking a child.
+- Glob results normalize Windows path separators before applying the dotfile rule, so
+  patterns like `.*` no longer match `.` or `..` when the glob crate reports `.\`
+  paths.
 - `cerf -c` initializes signal handlers and ignores `SIGTTOU` while a child claims
   the terminal, so external commands and pipelines no longer hang when stdin is a
   controlling terminal.
@@ -165,5 +180,6 @@ tracked in detail.
   brace-style control flow, functions, variables, aliases, globbing, history,
   job control, and Windows/Unix support.
 
-[Unreleased]: https://github.com/cerfsh/cerf/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cerfsh/cerf/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/cerfsh/cerf/releases/tag/v0.3.1
 [0.3.0]: https://github.com/cerfsh/cerf/releases/tag/v0.3.0
