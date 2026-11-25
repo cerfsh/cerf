@@ -159,6 +159,7 @@ dependencies = [
  "nom",
  "reqwest",
  "rustyline",
+ "same-file",
  "sysinfo",
  "tempfile",
  "tokio",

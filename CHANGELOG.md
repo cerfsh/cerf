@@ -14,7 +14,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- `fs.cp` refuses to copy a file onto itself (directly, through a hard link, or
+  through a symlink) instead of truncating it to zero bytes and reporting success.
 
 ## [0.3.0] - 2026-11-24
 
