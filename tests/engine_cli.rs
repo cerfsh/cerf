@@ -527,3 +527,26 @@ fn cat_reads_stdin_without_operands_and_for_dash() {
     let output = cerf().args(["-c", &command]).output().expect("run cerf");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "file\n");
 }
+
+#[test]
+fn glob_does_not_match_dotfiles_unless_asked() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("a.txt"), "").expect("write a.txt");
+    std::fs::write(directory.path().join(".env"), "").expect("write .env");
+
+    let output = cerf()
+        .args(["-c", "io.echo *"])
+        .current_dir(directory.path())
+        .output()
+        .expect("run cerf");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "a.txt", "stdout was {stdout:?}");
+
+    let output = cerf()
+        .args(["-c", "io.echo .*"])
+        .current_dir(directory.path())
+        .output()
+        .expect("run cerf");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), ".env", "stdout was {stdout:?}");
+}

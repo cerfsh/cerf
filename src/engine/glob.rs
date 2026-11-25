@@ -19,12 +19,15 @@ pub fn expand_globs(args: &[Arg]) -> Vec<String> {
             continue;
         }
 
-        // Attempt glob expansion.
+        // Attempt glob expansion. The glob crate matches dotfiles by default,
+        // so filter them out unless the pattern component itself starts with a
+        // dot (POSIX shell behaviour).
         match glob::glob(&arg.value) {
             Ok(paths) => {
                 let mut matches: Vec<String> = paths
                     .filter_map(|entry| entry.ok())
                     .map(|p| p.to_string_lossy().into_owned())
+                    .filter(|matched| dotfile_rule_allows(&arg.value, matched))
                     .collect();
 
                 if matches.is_empty() {
@@ -43,6 +46,35 @@ pub fn expand_globs(args: &[Arg]) -> Vec<String> {
     }
 
     expanded
+}
+
+/// Check the POSIX rule that a leading dot must be matched literally.
+///
+/// The glob crate reports relative matches with a `./` prefix and includes the
+/// `.` / `..` entries, so those are normalized here.
+fn dotfile_rule_allows(pattern: &str, matched: &str) -> bool {
+    let normalize = |value: &str| value.strip_prefix("./").unwrap_or(value).to_string();
+    let pattern = normalize(pattern);
+    let matched = normalize(matched);
+
+    if matched == "." || matched == ".." || matched.ends_with("/.") || matched.ends_with("/..") {
+        return false;
+    }
+
+    let pattern_parts: Vec<&str> = pattern.split(['/', '\\']).collect();
+    let matched_parts: Vec<&str> = matched.split(['/', '\\']).collect();
+    if pattern_parts.len() == matched_parts.len() {
+        return pattern_parts
+            .iter()
+            .zip(matched_parts.iter())
+            .all(|(pat, part)| !(part.starts_with('.') && !pat.starts_with('.')));
+    }
+
+    // Fall back to the final component when the shapes differ (e.g. `**`).
+    match (pattern_parts.last(), matched_parts.last()) {
+        (Some(pat), Some(part)) => !(part.starts_with('.') && !pat.starts_with('.')),
+        _ => true,
+    }
 }
 
 /// Does `s` contain any glob meta-characters?
