@@ -838,8 +838,11 @@ pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (Exec
         }
         last_code = code;
 
-        if let ExecutionResult::Exit = result {
-            return (ExecutionResult::Exit, last_code);
+        match result {
+            ExecutionResult::KeepRunning => {}
+            // `break` / `continue` / `exit` must reach the enclosing loop or
+            // the REPL instead of being swallowed here.
+            other => return (other, last_code),
         }
     }
 

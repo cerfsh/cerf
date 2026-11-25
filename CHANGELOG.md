@@ -26,6 +26,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Redirects are applied for in-process builtins (`echo hi > out.txt`,
   `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
   them silently and used the terminal instead.
+- `break` and `continue` return from the command list that contains them, so loops
+  now stop or advance instead of swallowing them and running forever.
 - Redirected control-flow blocks are executed in place with their redirects applied,
   instead of being re-serialized into a subprocess where commands were merged and
   their own redirects and assignments were lost.

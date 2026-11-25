@@ -357,3 +357,25 @@ fn redirected_block_keeps_each_command_separate() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
 }
+
+#[test]
+fn break_and_continue_control_their_loop() {
+    let output = cerf()
+        .args(["-c", "for x in a b c { io.echo $x; break }"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a\n");
+
+    let output = cerf()
+        .args(["-c", "for x in a b c { continue; io.echo $x }"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty(), "{output:?}");
+
+    let output = cerf()
+        .args(["-c", "while true { break }"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+}
