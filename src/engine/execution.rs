@@ -175,6 +175,87 @@ impl Drop for StdioRedirect {
     }
 }
 
+/// Windows equivalent of `StdioRedirect`: `SetStdHandle` is process-global and
+/// Rust's std looks up the handle on every read/write, so an in-process builtin
+/// can be redirected without forking (which would lose shell state).
+#[cfg(windows)]
+struct StdioRedirect {
+    saved: Vec<(
+        windows_sys::Win32::System::Console::STD_HANDLE,
+        windows_sys::Win32::Foundation::HANDLE,
+    )>,
+    files: Vec<std::fs::File>,
+}
+
+#[cfg(windows)]
+impl StdioRedirect {
+    fn apply(redirects: &[crate::parser::Redirect], state: &ShellState) -> Result<Self, String> {
+        use std::io::Write as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        };
+
+        let (stdin_redir, stdout_redir) = resolve_redirects(redirects);
+        let mut files = Vec::new();
+        let mut targets = Vec::new();
+        if let Some(redir) = stdin_redir {
+            let mut expanded = redir.clone();
+            expanded.file = expand_vars(&redir.file, &state.variables);
+            files.push(open_stdin_redirect(&expanded)?);
+            targets.push(STD_INPUT_HANDLE);
+        }
+        if let Some(redir) = stdout_redir {
+            let mut expanded = redir.clone();
+            expanded.file = expand_vars(&redir.file, &state.variables);
+            files.push(open_stdout_redirect(&expanded)?);
+            targets.push(STD_OUTPUT_HANDLE);
+        }
+
+        let _ = std::io::stdout().flush();
+        let mut guard = StdioRedirect {
+            saved: Vec::new(),
+            files,
+        };
+        for (file, target) in guard.files.iter().zip(targets) {
+            use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+            let handle = file.as_raw_handle() as _;
+            // Mark the file inheritable so children spawned while the redirect
+            // is active inherit it, the way Unix passes fd 0/1 down.
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == 0
+            {
+                return Err(format!(
+                    "cerf: redirect: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let saved = unsafe { GetStdHandle(target) };
+            if unsafe { SetStdHandle(target, handle) } == 0 {
+                return Err(format!(
+                    "cerf: redirect: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            guard.saved.push((target, saved));
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StdioRedirect {
+    fn drop(&mut self) {
+        use std::io::Write as _;
+
+        let _ = std::io::stdout().flush();
+        for &(target, saved) in self.saved.iter().rev() {
+            unsafe { windows_sys::Win32::System::Console::SetStdHandle(target, saved) };
+        }
+    }
+}
+
 fn execute_process(
     mut command: Command,
     name: &str,
@@ -394,17 +475,9 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
     };
 
     if let Some(cmd_info) = builtins::registry::find_command(name.as_str()) {
-        // Windows cannot swap descriptors in-process, so redirected builtins
-        // run isolated there. On Unix redirects are applied around the call.
-        #[cfg(not(unix))]
-        let needs_redirect_isolation = !cmd.redirects.is_empty();
-        #[cfg(unix)]
-        let needs_redirect_isolation = false;
-
         if pipeline.background
             || builtins::registry::is_process_isolated(&name)
             || isolated_wrapper.is_some()
-            || needs_redirect_isolation
         {
             let (launch_name, launch_args) = match isolated_wrapper {
                 Some(target) => target,
@@ -500,23 +573,21 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
             _ => true,
         };
         if !redirects.is_empty() && in_process {
-            #[cfg(unix)]
-            {
-                let _guard = match StdioRedirect::apply(redirects, state) {
-                    Ok(guard) => guard,
-                    Err(error) => {
-                        eprintln!("{}", error);
-                        return (ExecutionResult::KeepRunning, 1);
-                    }
-                };
-                return execute_node(&pipeline, node, state);
-            }
+            // Windows cannot hand a redirected block's descriptors to the
+            // processes it spawns, so blocks still run in a subshell there.
             #[cfg(not(unix))]
-            {
-                if !matches!(node, crate::parser::CommandNode::Simple(_)) {
-                    return execute_block_with_redirects(&pipeline, node, redirects, state);
-                }
+            if !matches!(node, crate::parser::CommandNode::Simple(_)) {
+                return execute_block_with_redirects(&pipeline, node, redirects, state);
             }
+
+            let _guard = match StdioRedirect::apply(redirects, state) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    return (ExecutionResult::KeepRunning, 1);
+                }
+            };
+            return execute_node(&pipeline, node, state);
         }
         return execute_node(&pipeline, node, state);
     }

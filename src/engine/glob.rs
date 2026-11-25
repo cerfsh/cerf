@@ -50,10 +50,18 @@ pub fn expand_globs(args: &[Arg]) -> Vec<String> {
 
 /// Check the POSIX rule that a leading dot must be matched literally.
 ///
-/// The glob crate reports relative matches with a `./` prefix and includes the
-/// `.` / `..` entries, so those are normalized here.
+/// The glob crate reports relative matches with a `./` prefix (`.\\` on
+/// Windows) and includes the `.` / `..` entries, so those are normalized here.
 fn dotfile_rule_allows(pattern: &str, matched: &str) -> bool {
-    let normalize = |value: &str| value.strip_prefix("./").unwrap_or(value).to_string();
+    // Compare components with one separator; Windows reports `.\.` etc.
+    let normalize = |value: &str| {
+        let value = value.replace('\\', "/");
+        value
+            .strip_prefix("./")
+            .unwrap_or(&value)
+            .trim_end_matches('/')
+            .to_string()
+    };
     let pattern = normalize(pattern);
     let matched = normalize(matched);
 
@@ -61,8 +69,8 @@ fn dotfile_rule_allows(pattern: &str, matched: &str) -> bool {
         return false;
     }
 
-    let pattern_parts: Vec<&str> = pattern.split(['/', '\\']).collect();
-    let matched_parts: Vec<&str> = matched.split(['/', '\\']).collect();
+    let pattern_parts: Vec<&str> = pattern.split('/').collect();
+    let matched_parts: Vec<&str> = matched.split('/').collect();
     if pattern_parts.len() == matched_parts.len() {
         return pattern_parts
             .iter()
@@ -107,5 +115,14 @@ mod tests {
         let args = vec![Arg::plain("*.this_extension_should_not_exist_xyzzy")];
         let result = expand_globs(&args);
         assert_eq!(result, vec!["*.this_extension_should_not_exist_xyzzy"]);
+    }
+
+    #[test]
+    fn test_windows_paths_normalize_before_the_dotfile_rule() {
+        // The glob crate reports these as `.\` / `.\..` / `.\a.txt` on Windows.
+        assert!(!dotfile_rule_allows(".*", ".\\."));
+        assert!(!dotfile_rule_allows(".*", ".\\.."));
+        assert!(dotfile_rule_allows(".*", ".\\.env"));
+        assert!(dotfile_rule_allows("*", ".\\a.txt"));
     }
 }

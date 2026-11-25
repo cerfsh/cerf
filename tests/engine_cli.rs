@@ -413,7 +413,6 @@ fn wait_blocks_for_jobs_and_reports_status() {
 fn bracket_and_one_argument_test_forms_follow_posix() {
     for (script, expected) in [
         ("[ 1 = 1 ]", Some(0)),
-        ("[ -f /etc/passwd ]", Some(0)),
         ("[ ]", Some(1)),
         ("test !", Some(0)),
         ("test -n", Some(0)),
@@ -424,6 +423,16 @@ fn bracket_and_one_argument_test_forms_follow_posix() {
         let output = cerf().args(["-c", script]).output().expect("run cerf");
         assert_eq!(output.status.code(), expected, "script was {script:?}");
     }
+
+    // `/etc/passwd` exists only on Unix, so use an absolute path this test creates.
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let existing = directory.path().join("existing.txt");
+    std::fs::write(&existing, "").expect("write file");
+    let output = cerf()
+        .args(["-c", &format!("[ -f '{}' ]", existing.display())])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(0), "-f on an existing file");
 
     let output = cerf()
         .args(["-c", "if [ 1 = 1 ] { io.echo yes }"])
