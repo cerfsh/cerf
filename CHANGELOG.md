@@ -26,6 +26,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Redirects are applied for in-process builtins (`echo hi > out.txt`,
   `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
   them silently and used the terminal instead.
+- A background pipeline whose first element is skipped (assignment-only) records
+  the first spawned child as its process group instead of pgid 0, so `kill %n`
+  no longer signals the shell's own group. `kill` also refuses to signal pgid 0.
 - `kill` understands the full signal table (names and numbers, including `-0`),
   lists signals with `-l`, and reports unknown signal names and job specs instead
   of silently sending `SIGTERM` or succeeding.

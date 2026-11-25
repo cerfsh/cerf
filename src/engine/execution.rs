@@ -710,7 +710,10 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
         match result {
             Ok(mut child) => {
                 let pid = child.id();
-                if i == 0 {
+                // The first *spawned* command defines the process group.
+                // An assignment-only first element is skipped above, so `i`
+                // is not a reliable marker here.
+                if first_pgid == 0 {
                     first_pgid = pid;
                 }
 
@@ -753,6 +756,12 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                 return (ExecutionResult::KeepRunning, 127);
             }
         }
+    }
+
+    if processes.is_empty() {
+        // Every pipeline element was skipped (for example assignment-only):
+        // there is no process to track and never a pgid 0 job.
+        return (ExecutionResult::KeepRunning, 0);
     }
 
     let job = crate::engine::state::Job {

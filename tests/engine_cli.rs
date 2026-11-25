@@ -470,3 +470,32 @@ fn kill_zero_probes_without_signalling() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("TERM"));
 }
+
+#[cfg(unix)]
+#[test]
+fn background_pipeline_uses_first_spawned_pid_as_pgid() {
+    // The first pipeline element is assignment-only and produces no process;
+    // the job must still record the real child's pid, never pgid 0.
+    let output = cerf()
+        .args(["-c", "X=1 >/dev/null | /bin/sleep 20 & kill %1"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("[1] "))
+        .expect("job registration");
+    assert_ne!(pid.trim(), "0", "job registered with pgid 0: {stdout:?}");
+
+    // Killing that job must not signal the shell's own process group.
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "{} -c 'X=1 >/dev/null | /bin/sleep 20 & kill %1'",
+            env!("CARGO_BIN_EXE_cerf")
+        ))
+        .output()
+        .expect("run sh");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
