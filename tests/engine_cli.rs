@@ -316,3 +316,44 @@ fn background_command_inside_isolated_builtin_is_registered() {
         "both the outer shell and the isolated builtin should register a background job; stdout was {stdout:?}"
     );
 }
+
+#[test]
+fn builtin_stdout_redirect_writes_the_file() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("echo.out");
+    let command = format!("echo hi > '{}'", path.display());
+
+    let output = cerf().args(["-c", &command]).output().expect("run cerf");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "output leaked: {output:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi\n");
+}
+
+#[test]
+fn builtin_stdin_redirect_is_read() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("input.txt");
+    std::fs::write(&path, "fileline\n").expect("write input");
+    let command = format!("read x < '{}'; io.echo \"x=$x\"", path.display());
+
+    let output = cerf().args(["-c", &command]).output().expect("run cerf");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "x=fileline\n");
+}
+
+#[test]
+fn redirected_block_keeps_each_command_separate() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("block.out");
+    let command = format!(
+        "if true {{ io.echo one; io.echo two }} > '{}'",
+        path.display()
+    );
+
+    let output = cerf().args(["-c", &command]).output().expect("run cerf");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+}

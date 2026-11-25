@@ -23,6 +23,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   exactly once (values containing `$` are no longer expanded recursively).
 - Empty quoted words (`""` and `''`) parse as empty arguments instead of syntax
   errors.
+- Redirects are applied for in-process builtins (`echo hi > out.txt`,
+  `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
+  them silently and used the terminal instead.
+- Redirected control-flow blocks are executed in place with their redirects applied,
+  instead of being re-serialized into a subprocess where commands were merged and
+  their own redirects and assignments were lost.
 - `fs.cp` refuses to copy a file onto itself (directly, through a hard link, or
   through a symlink) instead of truncating it to zero bytes and reporting success.
 - `fs.rm` refuses `.`, `..`, and the filesystem root before deleting anything.

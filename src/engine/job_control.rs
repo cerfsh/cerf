@@ -285,18 +285,26 @@ pub fn format_command(pipeline: &crate::parser::Pipeline) -> String {
 pub fn format_node_full(node: &crate::parser::CommandNode) -> String {
     match node {
         crate::parser::CommandNode::Simple(s) => {
-            let mut parts = vec![];
-            if let Some(n) = &s.name {
-                parts.push(n.clone());
+            let mut parts = Vec::new();
+            for (key, value) in &s.assignments {
+                parts.push(format!("{}={}", key, quote_word(&value.value)));
             }
-            parts.extend(s.args.iter().map(|a| {
-                if a.quoted {
-                    format!("\"{}\"", a.value)
-                } else {
-                    a.value.clone()
-                }
-            }));
-            parts.join(" ")
+            if let Some(n) = &s.name {
+                parts.push(quote_word(n));
+            }
+            parts.extend(s.args.iter().map(|a| quote_word(&a.value)));
+            let mut rendered = parts.join(" ");
+            for redirect in &s.redirects {
+                rendered.push(' ');
+                rendered.push_str(match redirect.kind {
+                    crate::parser::RedirectKind::StdoutOverwrite => ">",
+                    crate::parser::RedirectKind::StdoutAppend => ">>",
+                    crate::parser::RedirectKind::StdinFrom => "<",
+                });
+                rendered.push(' ');
+                rendered.push_str(&quote_word(&redirect.file));
+            }
+            rendered
         }
         crate::parser::CommandNode::If {
             branches,
@@ -329,13 +337,7 @@ pub fn format_node_full(node: &crate::parser::CommandNode) -> String {
             s.push_str(
                 &items
                     .iter()
-                    .map(|a| {
-                        if a.quoted {
-                            format!("\"{}\"", a.value)
-                        } else {
-                            a.value.clone()
-                        }
-                    })
+                    .map(|a| quote_word(&a.value))
                     .collect::<Vec<_>>()
                     .join(" "),
             );
@@ -369,23 +371,36 @@ pub fn format_node_full(node: &crate::parser::CommandNode) -> String {
     }
 }
 
+/// Quote a word so the rendered command is unambiguous (display only).
+fn quote_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,^".contains(c))
+    {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
 fn format_list(entries: &[crate::parser::CommandEntry]) -> String {
-    entries
-        .iter()
-        .map(|e| {
-            let mut s = crate::engine::job_control::format_command(&e.pipeline);
-            if let Some(conn) = e.connector {
-                match conn {
-                    crate::parser::Connector::And => s.push_str(" && "),
-                    crate::parser::Connector::Or => s.push_str(" || "),
-                    crate::parser::Connector::Semi => s.push_str(" ; "),
-                    crate::parser::Connector::Amp => s.push_str(" & "),
-                }
+    let mut out = String::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            // `entry.connector` describes the operator *preceding* this
+            // command, so it must be emitted before the command itself.
+            if let Some(conn) = entry.connector {
+                out.push_str(match conn {
+                    crate::parser::Connector::And => " && ",
+                    crate::parser::Connector::Or => " || ",
+                    crate::parser::Connector::Semi => " ; ",
+                    crate::parser::Connector::Amp => " & ",
+                });
             }
-            s
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        }
+        out.push_str(&crate::engine::job_control::format_command(&entry.pipeline));
+    }
+    out
 }
 
 pub fn set_current_job(state: &mut ShellState, job_id: usize) {

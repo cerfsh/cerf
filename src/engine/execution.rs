@@ -88,6 +88,93 @@ fn apply_command_io(
     Ok(())
 }
 
+/// True when the command will be run inside this process, so redirects must
+/// be applied by swapping descriptors instead of handing them to a child.
+fn simple_is_in_process_builtin(cmd: &crate::parser::SimpleCommand, state: &ShellState) -> bool {
+    let Some(raw_name) = cmd.name.as_deref() else {
+        return false;
+    };
+    let name = expand_vars(raw_name, &state.variables);
+    if state.functions.contains_key(&name) {
+        return false;
+    }
+    if crate::builtins::registry::is_process_isolated(&name) {
+        return false;
+    }
+    crate::builtins::registry::find_command(&name).is_some()
+}
+
+/// Temporarily point stdin/stdout at redirection files for an in-process
+/// builtin or control-flow block, restoring the originals on drop.
+///
+/// This is what makes `echo hi > out.txt`, `cat < in.txt`, and `read` honor
+/// redirects without forking a child (which would lose shell state).
+#[cfg(unix)]
+struct StdioRedirect {
+    saved: Vec<(i32, i32)>,
+}
+
+#[cfg(unix)]
+impl StdioRedirect {
+    fn apply(redirects: &[crate::parser::Redirect], state: &ShellState) -> Result<Self, String> {
+        use std::io::Write as _;
+        use std::os::fd::IntoRawFd as _;
+
+        let (stdin_redir, stdout_redir) = resolve_redirects(redirects);
+        let mut files: Vec<(std::fs::File, i32)> = Vec::new();
+        if let Some(redir) = stdin_redir {
+            let mut expanded = redir.clone();
+            expanded.file = expand_vars(&redir.file, &state.variables);
+            files.push((open_stdin_redirect(&expanded)?, nix::libc::STDIN_FILENO));
+        }
+        if let Some(redir) = stdout_redir {
+            let mut expanded = redir.clone();
+            expanded.file = expand_vars(&redir.file, &state.variables);
+            files.push((open_stdout_redirect(&expanded)?, nix::libc::STDOUT_FILENO));
+        }
+
+        let _ = std::io::stdout().flush();
+        let mut guard = StdioRedirect { saved: Vec::new() };
+        for (file, target) in files {
+            let raw = file.into_raw_fd();
+            // SAFETY: `raw` and `target` are valid descriptors; failures are
+            // reported and every successful swap is restored by `Drop`.
+            let saved = unsafe { nix::libc::dup(target) };
+            if saved < 0 {
+                unsafe { nix::libc::close(raw) };
+                return Err(format!(
+                    "cerf: redirect: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if unsafe { nix::libc::dup2(raw, target) } < 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    nix::libc::close(saved);
+                    nix::libc::close(raw);
+                }
+                return Err(format!("cerf: redirect: {}", error));
+            }
+            unsafe { nix::libc::close(raw) };
+            guard.saved.push((saved, target));
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StdioRedirect {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        for &(saved, target) in &self.saved {
+            unsafe {
+                nix::libc::dup2(saved, target);
+                nix::libc::close(saved);
+            }
+        }
+    }
+}
+
 fn execute_process(
     mut command: Command,
     name: &str,
@@ -307,15 +394,17 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
     };
 
     if let Some(cmd_info) = builtins::registry::find_command(name.as_str()) {
-        // Some builtins (like history, dirs) need access to the stdout redirect directly
-        // rather than us handling it here, because they might format output differently or
-        // need to manage the File themselves. For backward compatibility with the current
-        // signatures that don't take redirects, we'll temporarily handle redirects here for
-        // the generic cases (echo, help, pwd, type) that previously had them inline.
+        // Windows cannot swap descriptors in-process, so redirected builtins
+        // run isolated there. On Unix redirects are applied around the call.
+        #[cfg(not(unix))]
+        let needs_redirect_isolation = !cmd.redirects.is_empty();
+        #[cfg(unix)]
+        let needs_redirect_isolation = false;
 
         if pipeline.background
             || builtins::registry::is_process_isolated(&name)
             || isolated_wrapper.is_some()
+            || needs_redirect_isolation
         {
             let (launch_name, launch_args) = match isolated_wrapper {
                 Some(target) => target,
@@ -350,38 +439,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         let run_generic =
             |state: &mut ShellState| -> (ExecutionResult, i32) { (cmd_info.run)(&args, state) };
 
-        match name.as_str() {
-            "pushd" | "popd" | "dirs" | "history" => run_generic(state),
-            "pwd" | "help" | "echo" | "type" => {
-                if let Some(redir) = stdout_redir {
-                    match open_stdout_redirect(redir) {
-                        Ok(_) => {
-                            eprintln!(
-                                "cerf: warning: redirecting output of builtin '{}' is currently unsupported via registry",
-                                name
-                            );
-                            run_generic(state)
-                        }
-                        Err(error) => {
-                            eprintln!("{}", error);
-                            (ExecutionResult::KeepRunning, 1)
-                        }
-                    }
-                } else {
-                    run_generic(state)
-                }
-            }
-            "read" => {
-                if stdin_redir.is_some() {
-                    eprintln!(
-                        "cerf: warning: redirecting input of builtin '{}' is currently unsupported via registry",
-                        name
-                    );
-                }
-                run_generic(state)
-            }
-            _ => run_generic(state),
-        }
+        run_generic(state)
     } else {
         let resolved = find_executable(&name).unwrap_or_else(|| expand_home(&name));
 
@@ -433,162 +491,34 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
 
     // Single-command pipeline — just run the command directly (supports builtins).
     if cmds.len() == 1 {
-        match &cmds[0] {
-            crate::parser::CommandNode::Break => return (ExecutionResult::Break, 0),
-            crate::parser::CommandNode::Continue => return (ExecutionResult::Continue, 0),
-            crate::parser::CommandNode::If {
-                branches,
-                else_branch,
-                redirects,
-            } => {
-                if !redirects.is_empty() {
-                    return execute_block_with_redirects(&pipeline, &cmds[0], redirects, state);
-                }
-
-                let mut final_code = 0;
-                let mut executed = false;
-                for (cond, body) in branches {
-                    let (res, cond_code) = execute_list(cond.clone(), state);
-                    if !matches!(res, ExecutionResult::KeepRunning) {
-                        return (res, cond_code);
-                    }
-                    if cond_code == 0 {
-                        let (res, body_code) = execute_list(body.clone(), state);
-                        if !matches!(res, ExecutionResult::KeepRunning) {
-                            return (res, body_code);
-                        }
-                        final_code = body_code;
-                        executed = true;
-                        break;
-                    }
-                }
-                if !executed && let Some(body) = else_branch {
-                    let (res, body_code) = execute_list(body.clone(), state);
-                    if !matches!(res, ExecutionResult::KeepRunning) {
-                        return (res, body_code);
-                    }
-                    final_code = body_code;
-                }
-                let code = if pipeline.negated {
-                    if final_code == 0 { 1 } else { 0 }
-                } else {
-                    final_code
-                };
-                return (ExecutionResult::KeepRunning, code);
-            }
-            crate::parser::CommandNode::FuncDecl { name, body } => {
-                state.functions.insert(name.clone(), body.clone());
-                return (ExecutionResult::KeepRunning, 0);
-            }
-            crate::parser::CommandNode::For {
-                var,
-                items,
-                body,
-                redirects,
-            } => {
-                if !redirects.is_empty() {
-                    return execute_block_with_redirects(&pipeline, &cmds[0], redirects, state);
-                }
-
-                // Expand variables in loop items
-                let expanded_items_vars = expand_args(items, state);
-
-                let expanded_items = expand_globs(&expanded_items_vars);
-                let mut final_code = 0;
-                for item in expanded_items {
-                    state.set_var(var, Variable::new_string(item.clone()));
-                    let (res, code) = execute_list(body.clone(), state);
-                    match res {
-                        ExecutionResult::Exit => return (res, code),
-                        ExecutionResult::Break => break,
-                        ExecutionResult::Continue => continue,
-                        ExecutionResult::KeepRunning => {
-                            final_code = code;
-                        }
-                    }
-                }
-                let code = if pipeline.negated {
-                    if final_code == 0 { 1 } else { 0 }
-                } else {
-                    final_code
-                };
-                return (ExecutionResult::KeepRunning, code);
-            }
-            crate::parser::CommandNode::While {
-                cond,
-                body,
-                redirects,
-            } => {
-                if !redirects.is_empty() {
-                    return execute_block_with_redirects(&pipeline, &cmds[0], redirects, state);
-                }
-
-                let mut final_code = 0;
-                loop {
-                    let (res, cond_code) = execute_list(cond.clone(), state);
-                    if !matches!(res, ExecutionResult::KeepRunning) {
-                        return (res, cond_code);
-                    }
-                    if cond_code != 0 {
-                        break;
-                    }
-                    let (res, body_code) = execute_list(body.clone(), state);
-                    match res {
-                        ExecutionResult::Exit => return (res, body_code),
-                        ExecutionResult::Break => break,
-                        ExecutionResult::Continue => continue,
-                        ExecutionResult::KeepRunning => {
-                            final_code = body_code;
-                        }
-                    }
-                }
-                let code = if pipeline.negated {
-                    if final_code == 0 { 1 } else { 0 }
-                } else {
-                    final_code
-                };
-                return (ExecutionResult::KeepRunning, code);
-            }
-            crate::parser::CommandNode::Loop { body, redirects } => {
-                if !redirects.is_empty() {
-                    return execute_block_with_redirects(&pipeline, &cmds[0], redirects, state);
-                }
-
-                let mut final_code = 0;
-                loop {
-                    let (res, body_code) = execute_list(body.clone(), state);
-                    match res {
-                        ExecutionResult::Exit => return (res, body_code),
-                        ExecutionResult::Break => break,
-                        ExecutionResult::Continue => continue,
-                        ExecutionResult::KeepRunning => {
-                            final_code = body_code;
-                        }
-                    }
-                }
-                return (ExecutionResult::KeepRunning, final_code);
-            }
+        let node = &cmds[0];
+        let redirects = node.redirects();
+        let in_process = match node {
             crate::parser::CommandNode::Simple(cmd) => {
-                let name = expand_vars(cmd.name.as_deref().unwrap_or(""), &state.variables);
-                if let Some(func_body) = state.functions.get(&name).cloned() {
-                    let (res, code) = execute_list(func_body, state);
-                    let final_code = if pipeline.negated {
-                        if code == 0 { 1 } else { 0 }
-                    } else {
-                        code
-                    };
-                    return (res, final_code);
-                }
-
-                let (res, code) = execute_simple(&pipeline, state);
-                let final_code = if pipeline.negated {
-                    if code == 0 { 1 } else { 0 }
-                } else {
-                    code
+                !pipeline.background && simple_is_in_process_builtin(cmd, state)
+            }
+            _ => true,
+        };
+        if !redirects.is_empty() && in_process {
+            #[cfg(unix)]
+            {
+                let _guard = match StdioRedirect::apply(redirects, state) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        eprintln!("{}", error);
+                        return (ExecutionResult::KeepRunning, 1);
+                    }
                 };
-                return (res, final_code);
+                return execute_node(&pipeline, node, state);
+            }
+            #[cfg(not(unix))]
+            {
+                if !matches!(node, crate::parser::CommandNode::Simple(_)) {
+                    return execute_block_with_redirects(&pipeline, node, redirects, state);
+                }
             }
         }
+        return execute_node(&pipeline, node, state);
     }
 
     // Multi-command pipeline: fork external processes connected by pipes.
@@ -916,6 +846,7 @@ pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (Exec
     (ExecutionResult::KeepRunning, last_code)
 }
 
+#[cfg(not(unix))]
 fn execute_block_with_redirects(
     pipeline: &Pipeline,
     node: &crate::parser::CommandNode,
@@ -1006,6 +937,147 @@ fn execute_block_with_redirects(
                 eprintln!("cerf: error executing block: {}", e);
                 (ExecutionResult::KeepRunning, 1)
             }
+        }
+    }
+}
+
+/// Execute a single command node in the current shell process.
+fn execute_node(
+    pipeline: &Pipeline,
+    node: &crate::parser::CommandNode,
+    state: &mut ShellState,
+) -> (ExecutionResult, i32) {
+    match node {
+        crate::parser::CommandNode::Break => (ExecutionResult::Break, 0),
+        crate::parser::CommandNode::Continue => (ExecutionResult::Continue, 0),
+        crate::parser::CommandNode::If {
+            branches,
+            else_branch,
+            ..
+        } => {
+            let mut final_code = 0;
+            let mut executed = false;
+            for (cond, body) in branches {
+                let (res, cond_code) = execute_list(cond.clone(), state);
+                if !matches!(res, ExecutionResult::KeepRunning) {
+                    return (res, cond_code);
+                }
+                if cond_code == 0 {
+                    let (res, body_code) = execute_list(body.clone(), state);
+                    if !matches!(res, ExecutionResult::KeepRunning) {
+                        return (res, body_code);
+                    }
+                    final_code = body_code;
+                    executed = true;
+                    break;
+                }
+            }
+            if !executed && let Some(body) = else_branch {
+                let (res, body_code) = execute_list(body.clone(), state);
+                if !matches!(res, ExecutionResult::KeepRunning) {
+                    return (res, body_code);
+                }
+                final_code = body_code;
+            }
+            let code = if pipeline.negated {
+                if final_code == 0 { 1 } else { 0 }
+            } else {
+                final_code
+            };
+            (ExecutionResult::KeepRunning, code)
+        }
+        crate::parser::CommandNode::FuncDecl { name, body } => {
+            state.functions.insert(name.clone(), body.clone());
+            (ExecutionResult::KeepRunning, 0)
+        }
+        crate::parser::CommandNode::For {
+            var, items, body, ..
+        } => {
+            // Expand variables in loop items
+            let expanded_items_vars = expand_args(items, state);
+
+            let expanded_items = expand_globs(&expanded_items_vars);
+            let mut final_code = 0;
+            for item in expanded_items {
+                state.set_var(var, Variable::new_string(item.clone()));
+                let (res, code) = execute_list(body.clone(), state);
+                match res {
+                    ExecutionResult::Exit => return (res, code),
+                    ExecutionResult::Break => break,
+                    ExecutionResult::Continue => continue,
+                    ExecutionResult::KeepRunning => {
+                        final_code = code;
+                    }
+                }
+            }
+            let code = if pipeline.negated {
+                if final_code == 0 { 1 } else { 0 }
+            } else {
+                final_code
+            };
+            (ExecutionResult::KeepRunning, code)
+        }
+        crate::parser::CommandNode::While { cond, body, .. } => {
+            let mut final_code = 0;
+            loop {
+                let (res, cond_code) = execute_list(cond.clone(), state);
+                if !matches!(res, ExecutionResult::KeepRunning) {
+                    return (res, cond_code);
+                }
+                if cond_code != 0 {
+                    break;
+                }
+                let (res, body_code) = execute_list(body.clone(), state);
+                match res {
+                    ExecutionResult::Exit => return (res, body_code),
+                    ExecutionResult::Break => break,
+                    ExecutionResult::Continue => continue,
+                    ExecutionResult::KeepRunning => {
+                        final_code = body_code;
+                    }
+                }
+            }
+            let code = if pipeline.negated {
+                if final_code == 0 { 1 } else { 0 }
+            } else {
+                final_code
+            };
+            (ExecutionResult::KeepRunning, code)
+        }
+        crate::parser::CommandNode::Loop { body, .. } => {
+            let mut final_code = 0;
+            loop {
+                let (res, body_code) = execute_list(body.clone(), state);
+                match res {
+                    ExecutionResult::Exit => return (res, body_code),
+                    ExecutionResult::Break => break,
+                    ExecutionResult::Continue => continue,
+                    ExecutionResult::KeepRunning => {
+                        final_code = body_code;
+                    }
+                }
+            }
+            (ExecutionResult::KeepRunning, final_code)
+        }
+        crate::parser::CommandNode::Simple(cmd) => {
+            let name = expand_vars(cmd.name.as_deref().unwrap_or(""), &state.variables);
+            if let Some(func_body) = state.functions.get(&name).cloned() {
+                let (res, code) = execute_list(func_body, state);
+                let final_code = if pipeline.negated {
+                    if code == 0 { 1 } else { 0 }
+                } else {
+                    code
+                };
+                return (res, final_code);
+            }
+
+            let (res, code) = execute_simple(pipeline, state);
+            let final_code = if pipeline.negated {
+                if code == 0 { 1 } else { 0 }
+            } else {
+                code
+            };
+            (res, final_code)
         }
     }
 }
