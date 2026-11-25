@@ -8,7 +8,7 @@ pub use ast::{
     Arg, CommandEntry, CommandNode, Connector, Pipeline, Redirect, RedirectKind, SimpleCommand,
 };
 pub use combinators::is_reserved_word;
-pub use expand::expand_vars;
+pub use expand::{expand_arg, expand_vars};
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -122,13 +122,17 @@ fn skip_leading_comments(input: &str) -> &str {
 ///
 /// Returns `None` if the line is empty or a comment.
 /// Returns `Some(entries)` where `entries` has at least one element.
+///
+/// Variable expansion is deliberately *not* performed here: the AST keeps
+/// `$name` references so bodies run with current values, and so variable
+/// contents are never re-parsed as syntax. `shell_vars` is accepted for
+/// API compatibility and ignored.
 pub fn parse_input(
     input: &str,
-    shell_vars: &std::collections::HashMap<String, crate::engine::state::Variable>,
+    _shell_vars: &std::collections::HashMap<String, crate::engine::state::Variable>,
 ) -> Option<Vec<CommandEntry>> {
     let preprocessed = join_continuations(input);
-    let expanded = expand_vars(&preprocessed, shell_vars);
-    let s = skip_leading_comments(&expanded).trim();
+    let s = skip_leading_comments(&preprocessed).trim();
     if s.is_empty() {
         return None;
     }
@@ -467,10 +471,10 @@ mod tests {
         );
     }
 
-    // ── integration: parse_pipeline with env expansion ────────────────────
+    // ── integration: parsing defers expansion to execution ───────────────
 
     #[test]
-    fn test_parse_line_expands_var_in_arg() {
+    fn test_parse_line_keeps_var_reference_in_arg() {
         let mut vars = std::collections::HashMap::new();
         vars.insert(
             "CERF_DIR".to_string(),
@@ -478,11 +482,11 @@ mod tests {
         );
         let cmd = parse_line_with_vars("cd $CERF_DIR", &vars).unwrap();
         assert_eq!(cmd.name().map(|n| n.as_str()), Some("cd"));
-        assert_eq!(arg_values(cmd.args()), vec!["/tmp/test"]);
+        assert_eq!(arg_values(cmd.args()), vec!["$CERF_DIR"]);
     }
 
     #[test]
-    fn test_parse_line_expands_var_in_quoted_arg() {
+    fn test_parse_line_keeps_var_reference_in_quoted_arg() {
         let mut vars = std::collections::HashMap::new();
         vars.insert(
             "CERF_MSG".to_string(),
@@ -490,7 +494,7 @@ mod tests {
         );
         let cmd = parse_line_with_vars("echo \"$CERF_MSG\"", &vars).unwrap();
         assert_eq!(cmd.name().map(|n| n.as_str()), Some("echo"));
-        assert_eq!(arg_values(cmd.args()), vec!["hello world"]);
+        assert_eq!(arg_values(cmd.args()), vec!["$CERF_MSG"]);
     }
 
     #[test]
@@ -507,38 +511,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_empty_quoted_words() {
+        let cmd = parse_line("echo \"\" ''").unwrap();
+        assert_eq!(arg_values(cmd.args()), vec!["", ""]);
+        assert!(cmd.args().iter().all(|a| a.quoted));
+    }
+
     // ── shell variable tests ──────────────────────────────────────────────
 
     #[test]
     fn test_parse_assignment_only() {
         let cmd = parse_line("FOO=bar").unwrap();
         assert!(cmd.name().is_none());
-        assert_eq!(cmd.assignments(), &[("FOO".to_string(), "bar".to_string())]);
+        assert_eq!(cmd.assignments()[0].0, "FOO");
+        assert_eq!(cmd.assignments()[0].1.value, "bar");
     }
 
     #[test]
     fn test_parse_multiple_assignments() {
         let cmd = parse_line("A=1 B=2 C=3").unwrap();
         assert_eq!(cmd.assignments().len(), 3);
-        assert_eq!(cmd.assignments()[0], ("A".to_string(), "1".to_string()));
-        assert_eq!(cmd.assignments()[2], ("C".to_string(), "3".to_string()));
+        assert_eq!(cmd.assignments()[0].0, "A");
+        assert_eq!(cmd.assignments()[0].1.value, "1");
+        assert_eq!(cmd.assignments()[2].0, "C");
+        assert_eq!(cmd.assignments()[2].1.value, "3");
     }
 
     #[test]
     fn test_parse_assignment_with_command() {
         let cmd = parse_line("VAR=val ls -l").unwrap();
         assert_eq!(cmd.name().map(|n| n.as_str()), Some("ls"));
-        assert_eq!(cmd.assignments(), &[("VAR".to_string(), "val".to_string())]);
+        assert_eq!(cmd.assignments()[0].0, "VAR");
+        assert_eq!(cmd.assignments()[0].1.value, "val");
         assert_eq!(arg_values(cmd.args()), vec!["-l"]);
     }
 
     #[test]
     fn test_parse_assignment_quoted_value() {
         let cmd = parse_line("MSG=\"hello world\" echo").unwrap();
-        assert_eq!(
-            cmd.assignments(),
-            &[("MSG".to_string(), "hello world".to_string())]
-        );
+        assert_eq!(cmd.assignments()[0].0, "MSG");
+        assert_eq!(cmd.assignments()[0].1.value, "hello world");
         assert_eq!(cmd.name().map(|n| n.as_str()), Some("echo"));
     }
 

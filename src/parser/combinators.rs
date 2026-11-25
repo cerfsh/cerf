@@ -9,31 +9,159 @@ use nom::{
 
 use super::ast::{
     Arg, CommandEntry, CommandNode, Connector, Pipeline, Redirect, RedirectKind, SimpleCommand,
+    WordPart,
 };
 
 // ── Low-level nom parsers ──────────────────────────────────────────────────
 
-/// A raw parsed segment: the text content and whether it came from quotes.
-type Segment = (String, bool);
+/// Append `ch` to `parts`, coalescing runs that share the same `expand` flag.
+fn push_part(parts: &mut Vec<WordPart>, ch: char, expand: bool) {
+    match parts.last_mut() {
+        Some(part) if part.expand == expand => part.text.push(ch),
+        _ => parts.push(WordPart {
+            text: ch.to_string(),
+            expand,
+        }),
+    }
+}
 
-/// Parse a double-quoted string: `"…"` — returns the content without quotes.
-fn parse_double_quoted(input: &str) -> IResult<&str, Segment> {
-    let (input, content) = delimited(char('"'), is_not("\""), char('"')).parse(input)?;
-    Ok((input, (content.to_string(), true)))
+fn push_str_part(parts: &mut Vec<WordPart>, text: &str, expand: bool) {
+    if text.is_empty() {
+        return;
+    }
+    match parts.last_mut() {
+        Some(part) if part.expand == expand => part.text.push_str(text),
+        _ => parts.push(WordPart {
+            text: text.to_string(),
+            expand,
+        }),
+    }
+}
+
+/// Parse a double-quoted string: `"…"`.
+///
+/// Variable references stay in the text for run-time expansion; `\$`, `\"`,
+/// `\\` and `\<newline>` become literal characters that are never expanded.
+fn parse_double_quoted(input: &str) -> IResult<&str, Vec<WordPart>> {
+    let rest = input.strip_prefix('"').ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char))
+    })?;
+    let mut rest = rest;
+    let mut parts = Vec::new();
+
+    loop {
+        if rest.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Char,
+            )));
+        }
+        if let Some(after) = rest.strip_prefix('"') {
+            return Ok((after, parts));
+        }
+        if let Some(after) = rest.strip_prefix('\\') {
+            let mut chars = after.chars();
+            match chars.next() {
+                Some(next @ ('$' | '"' | '\\')) => {
+                    push_part(&mut parts, next, false);
+                    rest = &after[next.len_utf8()..];
+                }
+                Some('\n') => {
+                    rest = &after[1..];
+                }
+                _ => {
+                    push_part(&mut parts, '\\', true);
+                    rest = after;
+                }
+            }
+            continue;
+        }
+        let ch = rest.chars().next().expect("non-empty");
+        push_part(&mut parts, ch, true);
+        rest = &rest[ch.len_utf8()..];
+    }
 }
 
 /// Parse a single-quoted string: `'…'` — returns the content without quotes.
-/// Single quotes suppress ALL special characters (POSIX behaviour).
-fn parse_single_quoted(input: &str) -> IResult<&str, Segment> {
-    let (input, content) = delimited(char('\''), is_not("'"), char('\'')).parse(input)?;
-    Ok((input, (content.to_string(), true)))
+/// Single quotes suppress ALL expansion (POSIX behaviour) and may be empty.
+fn parse_single_quoted(input: &str) -> IResult<&str, Vec<WordPart>> {
+    let rest = input.strip_prefix('\'').ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char))
+    })?;
+    let end = rest.find('\'').ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char))
+    })?;
+    let content = &rest[..end];
+    let parts = if content.is_empty() {
+        Vec::new()
+    } else {
+        vec![WordPart {
+            text: content.to_string(),
+            expand: false,
+        }]
+    };
+    Ok((&rest[end + 1..], parts))
 }
 
+const UNQUOTED_STOP: &[char] = &[' ', '\t', '\r', '\n', '"', '\'', ';', '&', '|', '>', '<'];
+
 /// Parse an unquoted run of ordinary characters.
-/// Stops at whitespace, quotes (`"` or `'`), and shell meta-characters.
-fn parse_unquoted(input: &str) -> IResult<&str, Segment> {
-    let (input, content) = is_not(" \t\r\n\"';& |><")(input)?;
-    Ok((input, (content.to_string(), false)))
+///
+/// Stops at whitespace, quotes, and shell meta-characters. A backslash makes
+/// the following character literal and protected from expansion.
+fn parse_unquoted(input: &str) -> IResult<&str, Vec<WordPart>> {
+    let mut parts = Vec::new();
+    let mut rest = input;
+    let mut consumed = false;
+
+    while let Some(ch) = rest.chars().next() {
+        if UNQUOTED_STOP.contains(&ch) {
+            break;
+        }
+        if ch == '\\' {
+            let mut chars = rest[1..].chars();
+            match chars.next() {
+                Some('\n') => {
+                    rest = &rest[2..];
+                }
+                Some(next) => {
+                    push_part(&mut parts, next, false);
+                    rest = &rest[1 + next.len_utf8()..];
+                    consumed = true;
+                }
+                None => {
+                    // Trailing backslash: keep it literally.
+                    push_part(&mut parts, '\\', false);
+                    rest = &rest[1..];
+                    consumed = true;
+                }
+            }
+            continue;
+        }
+        push_part(&mut parts, ch, true);
+        rest = &rest[ch.len_utf8()..];
+        consumed = true;
+    }
+
+    if !consumed {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )));
+    }
+    Ok((rest, parts))
+}
+
+/// One top-level construct inside a word and whether it was quoted.
+type Piece = (Vec<WordPart>, bool);
+
+fn parse_piece(input: &str) -> IResult<&str, Piece> {
+    alt((
+        nom::combinator::map(parse_double_quoted, |parts| (parts, true)),
+        nom::combinator::map(parse_single_quoted, |parts| (parts, true)),
+        nom::combinator::map(parse_unquoted, |parts| (parts, false)),
+    ))
+    .parse(input)
 }
 
 /// Parse one "word" (shell argument/token).
@@ -46,36 +174,31 @@ fn parse_unquoted(input: &str) -> IResult<&str, Segment> {
 /// Adjacent segments are concatenated, so `foo'bar baz'"qux"` → `foobar bazqux`.
 /// This matches POSIX sh tokenisation.
 ///
-/// Returns `Arg { value, quoted }` where `quoted` is `true` only when the
-/// **entire** word consists of a single quoted segment (e.g. `"hello"`).
+/// Returns an [`Arg`] whose `quoted` is `true` only when the **entire** word
+/// consists of a single quoted construct (e.g. `"hello"` or `''`).
 pub fn parse_arg(input: &str) -> IResult<&str, Arg> {
-    // We need at least one segment.
-    let (mut rest, first) =
-        alt((parse_double_quoted, parse_single_quoted, parse_unquoted)).parse(input)?;
+    let (mut rest, first) = parse_piece(input)?;
 
-    let mut value = first.0;
-    let mut segment_count = 1u32;
+    let mut parts = first.0;
+    let mut constructs = 1u32;
     let first_quoted = first.1;
 
     // Greedily consume further adjacent segments (no whitespace between them).
-    while let Ok((after, segment)) =
-        alt((parse_double_quoted, parse_single_quoted, parse_unquoted)).parse(rest)
-    {
-        value.push_str(&segment.0);
-        segment_count += 1;
-        // If any later segment differs in quote-state, it's mixed.
+    while let Ok((after, piece)) = parse_piece(rest) {
+        for part in piece.0 {
+            push_str_part(&mut parts, &part.text, part.expand);
+        }
+        constructs += 1;
         rest = after;
     }
 
-    // The word is considered "fully quoted" only when it is exactly one
-    // quoted segment (e.g., `"*.txt"` or `'*.txt'`).
-    let quoted = segment_count == 1 && first_quoted;
+    let quoted = constructs == 1 && first_quoted;
 
-    Ok((rest, Arg { value, quoted }))
+    Ok((rest, Arg::from_parts(parts, quoted)))
 }
 
-/// Parse one "word" as a plain `String` (used for redirect targets and
-/// assignment values where quoting metadata is irrelevant).
+/// Parse one "word" as a plain `String` (used for redirect targets where
+/// quoting metadata is irrelevant).
 pub fn parse_word(input: &str) -> IResult<&str, String> {
     let (rest, arg) = parse_arg(input)?;
     Ok((rest, arg.value))
@@ -102,7 +225,7 @@ fn parse_redirect(input: &str) -> IResult<&str, Redirect> {
 // ── Assignment parsing ────────────────────────────────────────────────────
 
 /// Parse a shell assignment: `VAR=VALUE`.
-fn parse_assignment(input: &str) -> IResult<&str, (String, String)> {
+fn parse_assignment(input: &str) -> IResult<&str, (String, Arg)> {
     let (input, name) = is_not(" \t\r\n\"';& |=><")(input)?;
     if name.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -111,9 +234,9 @@ fn parse_assignment(input: &str) -> IResult<&str, (String, String)> {
         )));
     }
     let (input, _) = char('=')(input)?;
-    let (input, value) = match parse_word(input) {
-        Ok((rest, val)) => (rest, val),
-        Err(_) => (input, String::new()),
+    let (input, value) = match parse_arg(input) {
+        Ok((rest, arg)) => (rest, arg),
+        Err(_) => (input, Arg::plain("")),
     };
     Ok((input, (name.to_string(), value)))
 }
@@ -131,7 +254,7 @@ pub fn is_reserved_word(word: &str) -> bool {
 pub fn parse_simple_command(input: &str) -> IResult<&str, SimpleCommand> {
     let (mut rest, _) = space0(input)?;
 
-    let mut assignments: Vec<(String, String)> = Vec::new();
+    let mut assignments: Vec<(String, Arg)> = Vec::new();
 
     // Parse zero or more assignments first.
     while let Ok((after_assign, assign)) = parse_assignment(rest) {

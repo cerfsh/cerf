@@ -3,7 +3,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use crate::builtins;
-use crate::parser::{Arg, CommandEntry, Connector, Pipeline, expand_vars};
+use crate::parser::{Arg, CommandEntry, Connector, Pipeline, expand_arg, expand_vars};
 #[cfg(unix)]
 use crate::signals;
 
@@ -12,6 +12,29 @@ use super::glob::expand_globs;
 use super::path::{expand_home, find_executable};
 use super::redirect::{open_stdin_redirect, open_stdout_redirect, resolve_redirects};
 use super::state::{ExecutionResult, ShellState, Variable};
+
+/// Expand every argument once against the current variables. The result is
+/// plain data: no parsing, no recursive expansion.
+fn expand_args(args: &[Arg], state: &ShellState) -> Vec<Arg> {
+    args.iter()
+        .map(|arg| Arg {
+            value: expand_arg(arg, &state.variables),
+            quoted: arg.quoted,
+            parts: Vec::new(),
+        })
+        .collect()
+}
+
+/// Expand a command's prefix assignments (`VAR=value cmd ...`).
+fn expanded_assignments(
+    assignments: &[(String, Arg)],
+    state: &ShellState,
+) -> Vec<(String, String)> {
+    assignments
+        .iter()
+        .map(|(key, value)| (key.clone(), expand_arg(value, &state.variables)))
+        .collect()
+}
 
 fn internal_command(name: &str, args: &[String]) -> Command {
     let executable = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf"));
@@ -238,7 +261,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
     if cmd.name.is_none() {
         // Just assignments
         for (key, val) in &cmd.assignments {
-            let expanded_val = expand_vars(val, &state.variables);
+            let expanded_val = expand_arg(val, &state.variables);
             state.set_var(key, Variable::new_string(expanded_val.clone()));
             // If already in env, update it there too
             if std::env::var(key).is_ok() {
@@ -271,14 +294,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
     let name = expand_vars(raw_name, &state.variables);
 
     // Expand variables in the argument list BEFORE glob expansion.
-    let expanded_args: Vec<Arg> = cmd
-        .args
-        .iter()
-        .map(|a| Arg {
-            value: expand_vars(&a.value, &state.variables),
-            quoted: a.quoted,
-        })
-        .collect();
+    let expanded_args = expand_args(&cmd.args, state);
 
     let args = expand_globs(&expanded_args);
 
@@ -305,12 +321,13 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
                 Some(target) => target,
                 None => (name.as_str(), args.as_slice()),
             };
+            let assignments = expanded_assignments(&cmd.assignments, state);
             let mut command = internal_command(launch_name, launch_args);
-            command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
+            command.envs(assignments.iter().map(|(key, value)| (key, value)));
             // Background builtins run in a child process, so hand them a
             // launch-time copy of the variables and options.
             let snapshot = if pipeline.background {
-                match state.write_snapshot(&cmd.assignments) {
+                match state.write_snapshot(&assignments) {
                     Ok(path) => {
                         command.env(super::state::SNAPSHOT_ENV, path.as_os_str());
                         Some(path)
@@ -387,7 +404,8 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         let mut command = Command::new(&resolved);
 
         command.args(&args);
-        command.envs(cmd.assignments.iter().map(|(key, value)| (key, value)));
+        let assignments = expanded_assignments(&cmd.assignments, state);
+        command.envs(assignments.iter().map(|(key, value)| (key, value)));
 
         if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
             eprintln!("{}", error);
@@ -473,13 +491,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                 }
 
                 // Expand variables in loop items
-                let expanded_items_vars: Vec<Arg> = items
-                    .iter()
-                    .map(|a| Arg {
-                        value: expand_vars(&a.value, &state.variables),
-                        quoted: a.quoted,
-                    })
-                    .collect();
+                let expanded_items_vars = expand_args(items, state);
 
                 let expanded_items = expand_globs(&expanded_items_vars);
                 let mut final_code = 0;
@@ -651,7 +663,8 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
         };
 
         // Expand globs on the argument list (only used for non-builtins).
-        let args = expand_globs(cmd.args());
+        let expanded = expand_args(cmd.args(), state);
+        let args = expand_globs(&expanded);
 
         #[cfg(windows)]
         let mut command = if is_builtin {
@@ -681,7 +694,8 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
             command
         };
 
-        command.envs(cmd.assignments().iter().map(|(k, v)| (k, v)));
+        let assignments = expanded_assignments(cmd.assignments(), state);
+        command.envs(assignments.iter().map(|(k, v)| (k, v)));
 
         // Stdin: first command may have < redirect, others get previous pipe
         if i == 0 {

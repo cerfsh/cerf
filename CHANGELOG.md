@@ -16,12 +16,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- Variables are expanded when a command runs instead of when it is parsed, so loop
+  and function bodies, `if`/`while` conditions, and sourced scripts observe current
+  values rather than the values captured at parse time.
+- Single quotes and a backslash now suppress expansion, and each word is expanded
+  exactly once (values containing `$` are no longer expanded recursively).
+- Empty quoted words (`""` and `''`) parse as empty arguments instead of syntax
+  errors.
 - `fs.cp` refuses to copy a file onto itself (directly, through a hard link, or
   through a symlink) instead of truncating it to zero bytes and reporting success.
 - `fs.rm` refuses `.`, `..`, and the filesystem root before deleting anything.
 - `cerf -c` initializes signal handlers and ignores `SIGTTOU` while a child claims
   the terminal, so external commands and pipelines no longer hang when stdin is a
   controlling terminal.
+
+### Security
+
+- Variable contents are treated as data: they are no longer re-parsed as shell
+  syntax, which closes a command-injection path through environment variables,
+  `read`, and command output.
 
 ## [0.3.0] - 2026-11-24
 

@@ -1,13 +1,29 @@
 // ── AST types ──────────────────────────────────────────────────────────────
 
+/// One run of characters inside a word.
+///
+/// `expand` is false for text protected from variable expansion by single
+/// quotes or a backslash. Expansion happens at execution time, not parse
+/// time, so variable contents are always treated as data.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct WordPart {
+    pub text: String,
+    pub expand: bool,
+}
+
 /// A single shell argument with quoting metadata.
 ///
 /// `quoted == true` means the argument was entirely wrapped in quotes
 /// (`'…'` or `"…"`), and should **not** undergo glob expansion.
+///
+/// `value` is the unexpanded text with quote characters removed. `parts`
+/// records which runs may be expanded; programmatically built arguments
+/// leave it empty and are used verbatim.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Arg {
     pub value: String,
     pub quoted: bool,
+    pub parts: Vec<WordPart>,
 }
 
 impl Arg {
@@ -15,11 +31,22 @@ impl Arg {
         Self {
             value: value.into(),
             quoted,
+            parts: Vec::new(),
         }
     }
 
     pub fn plain(value: impl Into<String>) -> Self {
         Self::new(value, false)
+    }
+
+    /// Build an argument from parsed word parts, deriving `value` from them.
+    pub fn from_parts(parts: Vec<WordPart>, quoted: bool) -> Self {
+        let value = parts.iter().map(|part| part.text.as_str()).collect();
+        Self {
+            value,
+            quoted,
+            parts,
+        }
     }
 }
 
@@ -31,7 +58,7 @@ pub fn arg_values(args: &[Arg]) -> Vec<&str> {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SimpleCommand {
-    pub assignments: Vec<(String, String)>,
+    pub assignments: Vec<(String, Arg)>,
     pub name: Option<String>,
     pub args: Vec<Arg>,
     pub redirects: Vec<Redirect>,
@@ -95,7 +122,7 @@ impl CommandNode {
         }
     }
 
-    pub fn assignments(&self) -> &[(String, String)] {
+    pub fn assignments(&self) -> &[(String, Arg)] {
         match self {
             Self::Simple(s) => &s.assignments,
             _ => &[],

@@ -58,11 +58,70 @@ pub fn expand_vars(
     result
 }
 
+/// Expand the expandable parts of a parsed argument exactly once.
+///
+/// Text protected by single quotes or a backslash is copied verbatim, so the
+/// resulting value is data and never re-parsed as shell syntax.
+pub fn expand_arg(
+    arg: &crate::parser::Arg,
+    shell_vars: &std::collections::HashMap<String, crate::engine::state::Variable>,
+) -> String {
+    if arg.parts.is_empty() {
+        return arg.value.clone();
+    }
+    let mut result = String::with_capacity(arg.value.len());
+    for part in &arg.parts {
+        if part.expand {
+            result.push_str(&expand_vars(&part.text, shell_vars));
+        } else {
+            result.push_str(&part.text);
+        }
+    }
+    result
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::Arg;
+    use crate::parser::ast::WordPart;
+
+    fn var(value: &str) -> crate::engine::state::Variable {
+        crate::engine::state::Variable::new_string(value.to_string())
+    }
+
+    fn parts(items: &[(&str, bool)]) -> Vec<WordPart> {
+        items
+            .iter()
+            .map(|(text, expand)| WordPart {
+                text: text.to_string(),
+                expand: *expand,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expand_arg_respects_protected_parts() {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("Q".to_string(), var("abc"));
+        let arg = Arg::from_parts(parts(&[("$Q", true)]), false);
+        assert_eq!(expand_arg(&arg, &vars), "abc");
+        let literal = Arg::from_parts(parts(&[("$Q", false)]), true);
+        assert_eq!(expand_arg(&literal, &vars), "$Q");
+        let mixed = Arg::from_parts(parts(&[("x", true), ("$Q", false), ("$Q", true)]), false);
+        assert_eq!(expand_arg(&mixed, &vars), "x$Qabc");
+    }
+
+    #[test]
+    fn expand_arg_is_not_recursive() {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("OUTER".to_string(), var("$INNER"));
+        vars.insert("INNER".to_string(), var("secret"));
+        let arg = Arg::from_parts(parts(&[("$OUTER", true)]), false);
+        assert_eq!(expand_arg(&arg, &vars), "$INNER");
+    }
 
     #[test]
     fn test_expand_known_var() {
