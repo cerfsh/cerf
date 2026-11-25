@@ -53,11 +53,6 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
             break;
         }
 
-        if !fg {
-            // Done waiting since we just wanted to perform an update or we don't block
-            break;
-        }
-
         let wait_res = waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WUNTRACED));
         match wait_res {
             Ok(WaitStatus::Exited(pid, code)) => {
@@ -100,6 +95,50 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
     last_code
 }
 
+/// Block until the child `pid` exits and return its status (POSIX `wait PID`).
+#[cfg(unix)]
+pub fn wait_for_pid(pid: i32, state: &mut ShellState) -> i32 {
+    // If the job already observed the exit, report the recorded status.
+    for job in state.jobs.values() {
+        for process in &job.processes {
+            if process.pid == pid as u32
+                && let JobState::Done(code) = &process.state
+            {
+                return *code;
+            }
+        }
+    }
+
+    loop {
+        match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED)) {
+            Ok(WaitStatus::Exited(_, code)) => {
+                update_pid_state(state, pid as u32, JobState::Done(code));
+                return code;
+            }
+            Ok(WaitStatus::Signaled(_, sig, _)) => {
+                let code = 128 + sig as i32;
+                update_pid_state(state, pid as u32, JobState::Done(code));
+                return code;
+            }
+            Ok(WaitStatus::Stopped(_, sig)) => {
+                update_pid_state(state, pid as u32, JobState::Stopped);
+                return 128 + sig as i32;
+            }
+            Ok(WaitStatus::Continued(_)) => continue,
+            Ok(_) => continue,
+            Err(nix::errno::Errno::ECHILD) => return 127,
+            Err(_) => return 127,
+        }
+    }
+}
+
+/// Windows has no `waitpid`; an unknown PID is reported as not-a-child.
+#[cfg(windows)]
+pub fn wait_for_pid(pid: i32, _state: &mut ShellState) -> i32 {
+    let _ = pid;
+    127
+}
+
 #[cfg(windows)]
 pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
     let mut last_code = 0;
@@ -122,10 +161,6 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
             if fg {
                 state.jobs.remove(&job_id);
             }
-            break;
-        }
-
-        if !fg {
             break;
         }
 

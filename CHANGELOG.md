@@ -26,6 +26,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Redirects are applied for in-process builtins (`echo hi > out.txt`,
   `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
   them silently and used the terminal instead.
+- `wait` blocks until its jobs finish and returns their status. A bare numeric
+  operand is now treated as a PID, while `%n` selects a job.
 - `break` and `continue` return from the command list that contains them, so loops
   now stop or advance instead of swallowing them and running forever.
 - Redirected control-flow blocks are executed in place with their redirects applied,

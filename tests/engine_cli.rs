@@ -379,3 +379,32 @@ fn break_and_continue_control_their_loop() {
         .expect("run cerf");
     assert!(output.status.success(), "{output:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn wait_blocks_for_jobs_and_reports_status() {
+    use std::time::{Duration, Instant};
+
+    let started = Instant::now();
+    let output = cerf()
+        .args(["-c", "/bin/sh -c 'sleep 0.3' & wait"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "wait returned before the job finished"
+    );
+
+    let output = cerf()
+        .args(["-c", "/bin/sh -c 'exit 7' & wait %1"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+
+    let output = cerf()
+        .args(["-c", "wait 999999"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(127), "{output:?}");
+}
