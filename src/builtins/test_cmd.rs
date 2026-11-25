@@ -10,8 +10,19 @@ pub const COMMAND_INFO_TEST: CommandInfo = CommandInfo {
     run: test_runner,
 };
 
+pub const COMMAND_INFO_BRACKET: CommandInfo = CommandInfo {
+    name: "test.bracket",
+    description: "Evaluate conditional expressions (alias of `test`).",
+    usage: "test.bracket [expr ]\n\nEvaluate conditional expressions following POSIX semantics; the final `]` is required.",
+    run: bracket_runner,
+};
+
 pub fn test_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
     (ExecutionResult::KeepRunning, run(args, false))
+}
+
+pub fn bracket_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
+    (ExecutionResult::KeepRunning, run(args, true))
 }
 
 /// The `test` / `[` built-in command.
@@ -40,28 +51,74 @@ pub fn run(args: &[String], invoked_as_bracket: bool) -> i32 {
         &args[..]
     };
 
-    // No arguments → false.
-    if expr_args.is_empty() {
-        return 1;
-    }
-
-    let mut pos = 0;
-    match parse_or(expr_args, &mut pos) {
-        Ok(result) => {
-            if pos != expr_args.len() {
-                eprintln!("cerf: test: unexpected argument `{}`", expr_args[pos]);
-                2
-            } else if result {
-                0
-            } else {
-                1
-            }
-        }
-        Err(e) => {
-            eprintln!("cerf: test: {}", e);
+    match eval(expr_args) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(error) => {
+            eprintln!("cerf: test: {}", error);
             2
         }
     }
+}
+
+/// Evaluate an expression using the POSIX argument-count rules before falling
+/// back to the general recursive-descent parser.
+fn eval(args: &[&str]) -> Result<bool, String> {
+    match args.len() {
+        0 => Ok(false),
+        // One argument is true when it is not empty, even if it looks like an
+        // operator (`test !`, `test -n`).
+        1 => Ok(!args[0].is_empty()),
+        2 => {
+            if args[0] == "!" {
+                return Ok(args[1].is_empty());
+            }
+            eval_unary(args[0], args[1])
+        }
+        3 => {
+            if is_binary_op(args[1]) {
+                return eval_binary(args[0], args[1], args[2]);
+            }
+            if args[0] == "!" {
+                return eval(&args[1..]).map(|value| !value);
+            }
+            if args[0] == "(" && args[2] == ")" {
+                return Ok(!args[1].is_empty());
+            }
+            Err(format!("unexpected argument `{}`", args[1]))
+        }
+        4 => {
+            if args[0] == "!" {
+                return eval(&args[1..]).map(|value| !value);
+            }
+            if args[0] == "(" && args[3] == ")" {
+                return eval(&args[1..3]);
+            }
+            eval_expression(args)
+        }
+        _ => eval_expression(args),
+    }
+}
+
+fn eval_unary(op: &str, operand: &str) -> Result<bool, String> {
+    match op {
+        "!" => Ok(operand.is_empty()),
+        "-n" => Ok(!operand.is_empty()),
+        "-z" => Ok(operand.is_empty()),
+        "-e" | "-f" | "-d" | "-r" | "-w" | "-x" | "-s" | "-L" | "-h" => {
+            eval_unary_file(op, operand)
+        }
+        _ => Err(format!("unexpected argument `{}`", op)),
+    }
+}
+
+fn eval_expression(args: &[&str]) -> Result<bool, String> {
+    let mut pos = 0;
+    let result = parse_or(args, &mut pos)?;
+    if pos != args.len() {
+        return Err(format!("unexpected argument `{}`", args[pos]));
+    }
+    Ok(result)
 }
 
 // ── Recursive-descent parser for test expressions ────────────────────────

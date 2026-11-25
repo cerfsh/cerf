@@ -33,6 +33,7 @@ pub const BUILTINS: &[CommandInfo] = &[
     builtins::system::COMMAND_INFO_CLEAR,
     builtins::system::COMMAND_INFO_EXEC,
     builtins::system::COMMAND_INFO_EXIT,
+    builtins::test_cmd::COMMAND_INFO_BRACKET,
     builtins::test_cmd::COMMAND_INFO_TEST,
     builtins::tether::COMMAND_INFO_TETHER,
     builtins::tether::COMMAND_INFO_UNTETHER,

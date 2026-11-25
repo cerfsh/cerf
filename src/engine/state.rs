@@ -653,7 +653,7 @@ fn init_default_aliases() -> HashMap<String, String> {
         ("true", "test.true"),
         ("false", "test.false"),
         ("test", "test.check"),
-        ("[", "test.check"),
+        ("[", "test.bracket"),
         ("cat", "fs.cat"),
         ("less", "fs.less"),
         ("more", "fs.more"),

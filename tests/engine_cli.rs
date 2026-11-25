@@ -408,3 +408,26 @@ fn wait_blocks_for_jobs_and_reports_status() {
         .expect("run cerf");
     assert_eq!(output.status.code(), Some(127), "{output:?}");
 }
+
+#[test]
+fn bracket_and_one_argument_test_forms_follow_posix() {
+    for (script, expected) in [
+        ("[ 1 = 1 ]", Some(0)),
+        ("[ -f /etc/passwd ]", Some(0)),
+        ("[ ]", Some(1)),
+        ("test !", Some(0)),
+        ("test -n", Some(0)),
+        ("test -f = -f", Some(0)),
+        ("test -n value", Some(0)),
+        ("test -z value", Some(1)),
+    ] {
+        let output = cerf().args(["-c", script]).output().expect("run cerf");
+        assert_eq!(output.status.code(), expected, "script was {script:?}");
+    }
+
+    let output = cerf()
+        .args(["-c", "if [ 1 = 1 ] { io.echo yes }"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "yes\n");
+}
