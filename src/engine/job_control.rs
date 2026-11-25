@@ -438,6 +438,19 @@ fn format_list(entries: &[crate::parser::CommandEntry]) -> String {
     out
 }
 
+/// Mark a resumed job's stopped processes as running again.
+///
+/// `fg` must do this immediately after `SIGCONT`; otherwise `wait_for_job`
+/// still sees a stopped job and returns before waiting for it.
+pub fn resume_job(job: &mut crate::engine::state::Job) {
+    job.reported_done = false;
+    for process in &mut job.processes {
+        if process.state == JobState::Stopped {
+            process.state = JobState::Running;
+        }
+    }
+}
+
 pub fn set_current_job(state: &mut ShellState, job_id: usize) {
     if state.current_job == Some(job_id) {
         return;
@@ -485,4 +498,38 @@ pub struct IocpMessage {
     pub msg: u32,
     pub job_id: usize,
     pub pid: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::state::{Job, JobState, ProcessInfo};
+
+    fn stopped_job() -> Job {
+        Job {
+            id: 1,
+            #[cfg(unix)]
+            pgid: 4242,
+            #[cfg(windows)]
+            job_handle: 0,
+            command: "sleep 5".to_string(),
+            processes: vec![ProcessInfo {
+                pid: 4242,
+                state: JobState::Stopped,
+            }],
+            reported_done: true,
+        }
+    }
+
+    #[test]
+    fn resume_job_clears_stopped_state_before_waiting() {
+        let mut job = stopped_job();
+        assert!(job.is_stopped());
+
+        resume_job(&mut job);
+
+        assert!(!job.is_stopped());
+        assert_eq!(job.state(), JobState::Running);
+        assert!(!job.reported_done);
+    }
 }

@@ -34,12 +34,7 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
     if let Some(id) = job_id {
         if let Some(job) = state.jobs.get_mut(&id) {
             println!("[{}] {}", id, job.command);
-            job.reported_done = false;
-            for p in &mut job.processes {
-                if p.state == crate::engine::JobState::Stopped {
-                    p.state = crate::engine::JobState::Running;
-                }
-            }
+            crate::engine::job_control::resume_job(job);
 
             #[cfg(unix)]
             {

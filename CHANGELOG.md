@@ -26,6 +26,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Redirects are applied for in-process builtins (`echo hi > out.txt`,
   `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
   them silently and used the terminal instead.
+- `fg` marks a resumed job as running before waiting, so the first `fg` of a
+  Ctrl-Z'd job waits for it instead of reporting `Stopped` and leaving it
+  running in the background.
 - Glob expansion no longer matches dotfiles: `*` skips hidden names while an
   explicit leading dot (`.env`, `.*`) still matches them.
 - `fs.cat` copies standard input when no file operand is given, and treats `-`

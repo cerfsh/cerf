@@ -31,34 +31,39 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
         return 1;
     }
 
-    if let Some(id) = job_id {
-        if state.jobs.contains_key(&id) {
-            println!("{}", state.jobs[&id].command);
-            #[cfg(unix)]
-            {
-                let pgid = state.jobs[&id].pgid;
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(-(pgid as i32)),
-                    nix::sys::signal::Signal::SIGCONT,
-                );
-                crate::engine::job_control::set_current_job(state, id);
-                crate::engine::job_control::wait_for_job(id, state, true)
-            }
-            #[cfg(windows)]
-            {
-                let pids = crate::builtins::kill_cmd::get_job_pids(state.jobs[&id].job_handle);
-                for pid in pids {
-                    crate::builtins::kill_cmd::suspend_or_resume_process_win(pid, false);
-                }
-                crate::engine::job_control::set_current_job(state, id);
-                crate::engine::job_control::wait_for_job(id, state, true)
-            }
-        } else {
-            eprintln!("cerf: fg: %{}: no such job", id);
-            1
-        }
-    } else {
+    let Some(id) = job_id else {
         eprintln!("cerf: fg: current: no such job");
-        1
+        return 1;
+    };
+
+    {
+        let Some(job) = state.jobs.get_mut(&id) else {
+            eprintln!("cerf: fg: %{}: no such job", id);
+            return 1;
+        };
+        println!("{}", job.command);
+        // The job is about to run again: clear Stopped before waiting, or
+        // wait_for_job returns immediately and leaves it untracked.
+        crate::engine::job_control::resume_job(job);
+
+        #[cfg(unix)]
+        {
+            let pgid = job.pgid;
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-(pgid as i32)),
+                nix::sys::signal::Signal::SIGCONT,
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let pids = crate::builtins::kill_cmd::get_job_pids(job.job_handle);
+            for pid in pids {
+                crate::builtins::kill_cmd::suspend_or_resume_process_win(pid, false);
+            }
+        }
     }
+
+    crate::engine::job_control::set_current_job(state, id);
+    crate::engine::job_control::wait_for_job(id, state, true)
 }
