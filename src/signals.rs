@@ -16,6 +16,17 @@ pub fn init() {
     }
 }
 
+/// Ignore SIGTTOU so a child can change the terminal's foreground process
+/// group without being stopped, even when the parent shell did not install its
+/// handlers (for example `cerf -c`). Restored by [`restore_default`] before
+/// `exec`.
+#[cfg(unix)]
+pub fn ignore_sigttou() {
+    unsafe {
+        signal(Signal::SIGTTOU, SigHandler::SigIgn).expect("Failed to ignore SIGTTOU");
+    }
+}
+
 /// Restore default signal handlers (for child processes)
 #[cfg(unix)]
 pub fn restore_default() {

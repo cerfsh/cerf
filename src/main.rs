@@ -25,6 +25,9 @@ fn main() -> ExitCode {
 
     if args.len() >= 3 && args[1] == "-c" {
         let input = &args[2];
+        // Without this, SIGTTOU keeps its default action and the child's
+        // `tcsetpgrp` stops it, hanging `-c` on a controlling terminal.
+        signals::init();
         let mut state = ShellState::new();
         let code = match parser::parse_pipeline(input, &state.variables) {
             Some(entries) => engine::execute_list(entries, &mut state).1,

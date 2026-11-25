@@ -4,6 +4,47 @@ fn cerf() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cerf"))
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn script_mode_runs_external_commands_on_a_terminal() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // util-linux `script` gives the child a controlling terminal so the job
+    // control path is exercised. Skip where it is unavailable or incompatible.
+    let version = match Command::new("script").arg("--version").output() {
+        Ok(output) => output,
+        Err(_) => return,
+    };
+    if !String::from_utf8_lossy(&version.stdout).contains("util-linux") {
+        return;
+    }
+
+    let mut child = Command::new("script")
+        .args(["-qec", "$CERF -c '/bin/echo hi | /bin/cat'", "/dev/null"])
+        .env("CERF", env!("CARGO_BIN_EXE_cerf"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn script");
+
+    // Watchdog: a regression stops the child with SIGTTOU and blocks forever.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for script") {
+            assert!(status.success(), "script exited with {status:?}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cerf -c hung on an external command with a controlling terminal");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn script_mode_propagates_builtin_status() {
     let output = cerf()

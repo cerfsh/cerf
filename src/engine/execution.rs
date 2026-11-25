@@ -85,6 +85,7 @@ fn execute_process(
     let result = unsafe {
         command
             .pre_exec(move || {
+                signals::ignore_sigttou();
                 let pid = nix::unistd::getpid();
                 // Background jobs always need their own process group so that
                 // job-control signalling (`kill %n`, `bg`, `fg`) targets a
@@ -737,6 +738,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
         let result = unsafe {
             command
                 .pre_exec(move || {
+                    signals::ignore_sigttou();
                     let pid = nix::unistd::getpid();
                     let pgid = if target_pgid == 0 {
                         pid
