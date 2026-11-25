@@ -13,89 +13,172 @@ pub fn kill_runner(args: &[String], state: &mut ShellState) -> (ExecutionResult,
     (ExecutionResult::KeepRunning, code)
 }
 
+const SIGNAL_NAMES: &[(&str, i32)] = &[
+    ("HUP", 1),
+    ("INT", 2),
+    ("QUIT", 3),
+    ("ILL", 4),
+    ("TRAP", 5),
+    ("ABRT", 6),
+    ("BUS", 7),
+    ("FPE", 8),
+    ("KILL", 9),
+    ("USR1", 10),
+    ("SEGV", 11),
+    ("USR2", 12),
+    ("PIPE", 13),
+    ("ALRM", 14),
+    ("TERM", 15),
+    ("STKFLT", 16),
+    ("CHLD", 17),
+    ("CONT", 18),
+    ("STOP", 19),
+    ("TSTP", 20),
+    ("TTIN", 21),
+    ("TTOU", 22),
+    ("URG", 23),
+    ("XCPU", 24),
+    ("XFSZ", 25),
+    ("VTALRM", 26),
+    ("PROF", 27),
+    ("WINCH", 28),
+    ("IO", 29),
+    ("PWR", 30),
+    ("SYS", 31),
+];
+
+/// Parse a signal name (`TERM`, `SIGTERM`, `term`) or number (`15`).
+fn parse_signal(spec: &str) -> Option<i32> {
+    let name = spec
+        .strip_prefix("SIG")
+        .or_else(|| spec.strip_prefix("sig"))
+        .unwrap_or(spec);
+    if let Ok(number) = name.parse::<i32>() {
+        // 0 is the "check only" signal; 1..=64 covers the usual range.
+        return (0..=64).contains(&number).then_some(number);
+    }
+    let upper = name.to_ascii_uppercase();
+    SIGNAL_NAMES
+        .iter()
+        .find(|(signal, _)| *signal == upper)
+        .map(|(_, number)| *number)
+}
+
+fn signal_name(number: i32) -> Option<&'static str> {
+    SIGNAL_NAMES
+        .iter()
+        .find(|(_, value)| *value == number)
+        .map(|(name, _)| *name)
+}
+
+fn list_signals(args: &[String]) -> i32 {
+    if args.is_empty() {
+        let names = SIGNAL_NAMES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("{}", names);
+        return 0;
+    }
+
+    let mut code = 0;
+    for arg in args {
+        match parse_signal(arg) {
+            Some(number) => match signal_name(number) {
+                Some(name) => println!("{}", name),
+                None => println!("{}", number),
+            },
+            None => {
+                eprintln!("cerf: kill: {}: invalid signal specification", arg);
+                code = 1;
+            }
+        }
+    }
+    code
+}
+
+/// Parse the optional signal option, returning the signal to send and the
+/// first operand index.
+fn parse_options(args: &[String]) -> Result<(i32, usize), String> {
+    let mut signal = 15;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-s" || arg == "-n" {
+            let spec = args
+                .get(index + 1)
+                .ok_or_else(|| format!("option requires an argument -- '{}'", arg))?;
+            signal = parse_signal(spec)
+                .ok_or_else(|| format!("{}: invalid signal specification", spec))?;
+            index += 2;
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix('-')
+            && !spec.is_empty()
+        {
+            signal = parse_signal(spec)
+                .ok_or_else(|| format!("{}: invalid signal specification", spec))?;
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    Ok((signal, index))
+}
+
 pub fn run(args: &[String], state: &mut ShellState) -> i32 {
     if args.is_empty() {
         eprintln!("cerf: kill: usage: kill [-s sigspec] pid | jobspec ...");
         return 1;
     }
 
-    let mut targets = Vec::new();
-    #[cfg(unix)]
-    let mut sig = nix::sys::signal::Signal::SIGTERM;
-    #[cfg(windows)]
-    let mut sig = 15; // SIGTERM
+    if args[0] == "-l" || args[0] == "--list" {
+        return list_signals(&args[1..]);
+    }
 
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "-s" && i + 1 < args.len() {
-            #[cfg(unix)]
-            {
-                if args[i + 1] == "KILL" || args[i + 1] == "9" {
-                    sig = nix::sys::signal::Signal::SIGKILL;
-                } else if args[i + 1] == "STOP" {
-                    sig = nix::sys::signal::Signal::SIGSTOP;
-                } else if args[i + 1] == "CONT" {
-                    sig = nix::sys::signal::Signal::SIGCONT;
-                } else if args[i + 1] == "INT" {
-                    sig = nix::sys::signal::Signal::SIGINT;
-                }
-            }
-            #[cfg(windows)]
-            {
-                if args[i + 1] == "KILL" || args[i + 1] == "9" {
-                    sig = 9;
-                } else if args[i + 1] == "STOP" {
-                    sig = 19; // SIGSTOP
-                } else if args[i + 1] == "CONT" {
-                    sig = 18; // SIGCONT
-                } else if args[i + 1] == "INT" {
-                    sig = 2; // SIGINT
-                }
-            }
-            i += 2;
-            continue;
-        } else if args[i].starts_with('-') && args[i].len() > 1 {
-            #[cfg(unix)]
-            {
-                let s = &args[i][1..];
-                if s == "9" || s == "KILL" {
-                    sig = nix::sys::signal::Signal::SIGKILL;
-                }
-            }
-            #[cfg(windows)]
-            {
-                let s = &args[i][1..];
-                if s == "9" || s == "KILL" {
-                    sig = 9;
-                }
-            }
-            i += 1;
-            continue;
+    let (sig, first_operand) = match parse_options(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("cerf: kill: {}", error);
+            return 1;
         }
-
-        targets.push(&args[i]);
-        i += 1;
+    };
+    let targets = &args[first_operand..];
+    if targets.is_empty() {
+        eprintln!("cerf: kill: usage: kill [-s sigspec] pid | jobspec ...");
+        return 1;
     }
 
     let mut code = 0;
+
     #[cfg(unix)]
     {
         for target in targets {
             let mut pids_to_kill = Vec::new();
 
             if target.starts_with('%') {
-                if let Ok(id) = crate::engine::job_control::resolve_job_specifier(target, state) {
-                    if let Some(job) = state.jobs.get(&id) {
-                        pids_to_kill.push(-(job.pgid as i32));
+                match crate::engine::job_control::resolve_job_specifier(target, state) {
+                    Ok(id) => match state.jobs.get(&id) {
+                        Some(job) if job.pgid != 0 => {
+                            pids_to_kill.push(-(job.pgid as i32));
+                        }
+                        Some(_) => {
+                            eprintln!("cerf: kill: {}: invalid process group", target);
+                            code = 1;
+                            continue;
+                        }
+                        None => {
+                            eprintln!("cerf: kill: {}: no such job", target);
+                            code = 1;
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("cerf: kill: {}", error);
+                        code = 1;
+                        continue;
                     }
-                } else {
-                    eprintln!(
-                        "cerf: kill: {}",
-                        crate::engine::job_control::resolve_job_specifier(target, state)
-                            .unwrap_err()
-                    );
-                    code = 1;
-                    continue;
                 }
             } else if let Ok(pid) = target.parse::<i32>() {
                 pids_to_kill.push(pid);
@@ -109,8 +192,13 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
             }
 
             for pid in pids_to_kill {
-                if let Err(e) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), sig) {
-                    eprintln!("cerf: kill: ({}) - {}", pid, e);
+                // SAFETY: plain libc call with a validated signal number.
+                if unsafe { nix::libc::kill(pid, sig) } != 0 {
+                    eprintln!(
+                        "cerf: kill: ({}) - {}",
+                        pid,
+                        std::io::Error::last_os_error()
+                    );
                     code = 1;
                 }
             }
@@ -124,19 +212,23 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
             let mut pids_to_kill = Vec::new();
 
             if target.starts_with('%') {
-                if let Ok(id) = crate::engine::job_control::resolve_job_specifier(target, state) {
-                    if let Some(job) = state.jobs.get(&id) {
-                        job_handle_to_kill = Some(job.job_handle);
-                        pids_to_kill.extend(job.processes.iter().map(|p| p.pid));
+                match crate::engine::job_control::resolve_job_specifier(target, state) {
+                    Ok(id) => match state.jobs.get(&id) {
+                        Some(job) => {
+                            job_handle_to_kill = Some(job.job_handle);
+                            pids_to_kill.extend(job.processes.iter().map(|p| p.pid));
+                        }
+                        None => {
+                            eprintln!("cerf: kill: {}: no such job", target);
+                            code = 1;
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("cerf: kill: {}", error);
+                        code = 1;
+                        continue;
                     }
-                } else {
-                    eprintln!(
-                        "cerf: kill: {}",
-                        crate::engine::job_control::resolve_job_specifier(target, state)
-                            .unwrap_err()
-                    );
-                    code = 1;
-                    continue;
                 }
             } else if let Ok(pid) = target.parse::<u32>() {
                 pids_to_kill.push(pid);
@@ -176,6 +268,12 @@ pub fn run(args: &[String], state: &mut ShellState) -> i32 {
                 for pid in pids_to_kill {
                     crate::builtins::kill_cmd::suspend_or_resume_process_win(pid, suspend);
                 }
+            } else if sig != 0 {
+                eprintln!(
+                    "cerf: kill: signal {} is not supported on this platform",
+                    sig
+                );
+                code = 1;
             }
         }
     }

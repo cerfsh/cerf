@@ -431,3 +431,42 @@ fn bracket_and_one_argument_test_forms_follow_posix() {
         .expect("run cerf");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "yes\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn kill_zero_probes_without_signalling() {
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id().to_string();
+
+    let output = cerf()
+        .args(["-c", &format!("kill -0 {}", pid)])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        child.try_wait().expect("poll child").is_none(),
+        "kill -0 terminated the target"
+    );
+
+    let output = cerf()
+        .args(["-c", &format!("kill -s HUP {}", pid)])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    let status = child.wait().expect("wait for child");
+    assert!(
+        status.code().is_none(),
+        "SIGHUP should terminate the child by signal: {status:?}"
+    );
+
+    let output = cerf().args(["-c", "kill %99"]).output().expect("run cerf");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let output = cerf().args(["-c", "kill -l"]).output().expect("run cerf");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("TERM"));
+}

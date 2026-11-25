@@ -26,6 +26,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Redirects are applied for in-process builtins (`echo hi > out.txt`,
   `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
   them silently and used the terminal instead.
+- `kill` understands the full signal table (names and numbers, including `-0`),
+  lists signals with `-l`, and reports unknown signal names and job specs instead
+  of silently sending `SIGTERM` or succeeding.
 - `[ ... ]` works again: `[` is its own builtin that strips the closing `]`, and
   one- to four-argument `test` forms follow the POSIX argument-count rules.
 - `wait` blocks until its jobs finish and returns their status. A bare numeric
