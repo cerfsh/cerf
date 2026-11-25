@@ -26,6 +26,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Redirects are applied for in-process builtins (`echo hi > out.txt`,
   `cat < in.txt`, `read x < in.txt`, `history > file`), which previously dropped
   them silently and used the terminal instead.
+- `fs.cat` copies standard input when no file operand is given, and treats `-`
+  as standard input instead of trying to open a file named `-`.
 - A background pipeline whose first element is skipped (assignment-only) records
   the first spawned child as its process group instead of pgid 0, so `kill %n`
   no longer signals the shell's own group. `kill` also refuses to signal pgid 0.

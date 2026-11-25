@@ -499,3 +499,31 @@ fn background_pipeline_uses_first_spawned_pid_as_pgid() {
         .expect("run sh");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
 }
+
+#[test]
+fn cat_reads_stdin_without_operands_and_for_dash() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = cerf()
+        .args(["-c", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn cerf");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"from-stdin\n")
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "from-stdin\n");
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("input.txt");
+    std::fs::write(&path, "file\n").expect("write input");
+    let command = format!("cat - < '{}'", path.display());
+    let output = cerf().args(["-c", &command]).output().expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "file\n");
+}
