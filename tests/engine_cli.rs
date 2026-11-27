@@ -1234,3 +1234,39 @@ fn help_exits_zero_when_help_was_printed() {
         String::from_utf8_lossy(&missing.stderr)
     );
 }
+
+#[test]
+fn pushd_and_popd_refresh_pwd() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir(&first).expect("first directory");
+    std::fs::create_dir(&second).expect("second directory");
+    let first = std::fs::canonicalize(first).expect("canonical first");
+    let second = std::fs::canonicalize(second).expect("canonical second");
+
+    let output = cerf()
+        .args([
+            "-c",
+            &format!(
+                "cd '{}'; pushd '{}'; io.echo \"$PWD\"; popd; io.echo \"$PWD\"",
+                first.display(),
+                second.display()
+            ),
+        ])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "status: {:?}", output.status);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(&second.to_string_lossy().as_ref()),
+        "missing new PWD in {stdout:?}"
+    );
+    assert_eq!(
+        lines.last().copied(),
+        Some(first.to_string_lossy().as_ref()),
+        "popd did not restore PWD: {stdout:?}"
+    );
+}

@@ -75,6 +75,7 @@ pub fn pushd(
         state.previous_dir = Some(current.clone());
         state.dir_stack.push(current);
 
+        crate::builtins::cd::update_pwd(state);
         run_dirs(state, stdout_redirect);
         return Ok(());
     }
@@ -91,6 +92,7 @@ pub fn pushd(
     state.previous_dir = Some(current.clone());
     state.dir_stack.push(current);
 
+    crate::builtins::cd::update_pwd(state);
     run_dirs(state, stdout_redirect);
     Ok(())
 }
@@ -117,6 +119,7 @@ pub fn popd(
 
     state.previous_dir = Some(current);
 
+    crate::builtins::cd::update_pwd(state);
     run_dirs(state, stdout_redirect);
     Ok(())
 }

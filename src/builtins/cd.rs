@@ -52,7 +52,13 @@ pub fn run(args: &[String], state: &mut ShellState) -> Result<(), String> {
 
     state.previous_dir = Some(current);
 
-    // Update PWD
+    update_pwd(state);
+    Ok(())
+}
+
+/// Refresh `PWD` in the shell's variables and in the process environment
+/// after a successful directory change.
+pub fn update_pwd(state: &mut ShellState) {
     if let Ok(new_cwd) = env::current_dir() {
         let new_pwd = new_cwd.to_string_lossy().to_string();
         let mut var = crate::engine::state::Variable::new_string(new_pwd.clone());
@@ -62,7 +68,6 @@ pub fn run(args: &[String], state: &mut ShellState) -> Result<(), String> {
             env::set_var("PWD", new_pwd);
         }
     }
-    Ok(())
 }
 
 pub fn pwd() {
