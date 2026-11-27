@@ -191,30 +191,7 @@ fn option_names() -> &'static [&'static str] {
 ///
 /// Previous positional parameters are cleared first.
 fn set_positional_params(params: &[String], state: &mut ShellState) {
-    // Remove old positional parameters.
-    let mut idx = 1;
-    loop {
-        let key = idx.to_string();
-        if state.variables.remove(&key).is_none() {
-            break;
-        }
-        idx += 1;
-    }
-
-    // Remove old count.
-    state.variables.remove("#");
-
-    // Set new positional parameters.
-    for (i, val) in params.iter().enumerate() {
-        state.set_var(
-            &(i + 1).to_string(),
-            crate::engine::state::Variable::new_string(val.clone()),
-        );
-    }
-    state.set_var(
-        "#",
-        crate::engine::state::Variable::new_string(params.len().to_string()),
-    );
+    state.set_positional_parameters(params);
 }
 
 /// Quote a value for shell display (minimal quoting).

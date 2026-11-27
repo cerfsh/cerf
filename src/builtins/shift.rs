@@ -25,28 +25,9 @@ pub fn shift_runner(args: &[String], state: &mut ShellState) -> (ExecutionResult
         return (ExecutionResult::KeepRunning, 1);
     }
 
-    state.positional_args.drain(0..n);
-
-    let mut idx = 1;
-    loop {
-        let key = idx.to_string();
-        if state.variables.remove(&key).is_none() {
-            break;
-        }
-        idx += 1;
-    }
-
-    let params = state.positional_args.clone();
-    for (i, val) in params.iter().enumerate() {
-        state.set_var(
-            &(i + 1).to_string(),
-            crate::engine::state::Variable::new_string(val.clone()),
-        );
-    }
-    state.set_var(
-        "#",
-        crate::engine::state::Variable::new_string(params.len().to_string()),
-    );
+    let mut params = state.positional_args.clone();
+    params.drain(0..n);
+    state.set_positional_parameters(&params);
 
     (ExecutionResult::KeepRunning, 0)
 }

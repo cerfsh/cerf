@@ -1,6 +1,5 @@
 use crate::builtins::registry::CommandInfo;
-use crate::engine::state::{ExecutionResult, ShellState};
-use std::collections::HashMap;
+use crate::engine::state::{ExecutionResult, ShellState, Variable, is_valid_name};
 
 pub const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "env.export",
@@ -10,8 +9,8 @@ pub const COMMAND_INFO: CommandInfo = CommandInfo {
 };
 
 pub fn export_runner(args: &[String], state: &mut ShellState) -> (ExecutionResult, i32) {
-    run(args, &mut state.variables);
-    (ExecutionResult::KeepRunning, 0)
+    let code = run(args, state);
+    (ExecutionResult::KeepRunning, code)
 }
 
 /// Run the `export` builtin.
@@ -20,47 +19,82 @@ pub fn export_runner(args: &[String], state: &mut ShellState) -> (ExecutionResul
 /// - `export`             → print all environment variables
 /// - `export name=value`  → set variable in both shell and environment
 /// - `export name`        → promote existing shell variable to environment
-pub fn run(args: &[String], variables: &mut HashMap<String, crate::engine::state::Variable>) {
+pub fn run(args: &[String], state: &mut ShellState) -> i32 {
     if args.is_empty() {
-        let mut pairs: Vec<(String, String)> = std::env::vars().collect();
+        let mut pairs: Vec<(String, String)> = std::env::vars_os()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
         pairs.sort_by_key(|(k, _)| k.clone());
         for (name, value) in pairs {
             println!("export {}='{}'", name, value);
         }
-        return;
+        return 0;
     }
 
+    let mut exit_code = 0;
     for arg in args {
         if let Some(eq_pos) = arg.find('=') {
             // Assignment: name=value
-            let name = arg[..eq_pos].to_string();
-            let value = arg[eq_pos + 1..].to_string();
-            if name.is_empty() {
+            let name = &arg[..eq_pos];
+            let value = &arg[eq_pos + 1..];
+            if !is_valid_name(name) {
                 eprintln!("cerf: export: '{}': not a valid identifier", arg);
-            } else {
-                variables.insert(
-                    name.clone(),
-                    crate::engine::state::Variable::new_string(value.clone()),
-                );
-                unsafe {
-                    std::env::set_var(name, value);
-                }
+                exit_code = 1;
+                continue;
+            }
+
+            if state.get_var(name).is_some_and(|var| var.readonly) {
+                eprintln!("cerf: export: {}: readonly variable", name);
+                exit_code = 1;
+                continue;
+            }
+
+            // Exporting creates a shell variable carrying the export
+            // attribute. Previously `export FOO=one` inserted a variable with
+            // `exported = false`, so later assignments only updated the shell
+            // copy and `printenv FOO` stayed stale.
+            let mut var = state
+                .get_var(name)
+                .cloned()
+                .unwrap_or_else(|| Variable::new_string(String::new()));
+            var.value = crate::engine::state::VarValue::String(value.to_string());
+            var.exported = true;
+            state.set_var(name, var);
+            unsafe {
+                std::env::set_var(name, value);
             }
         } else {
-            // Export existing: promote existing shell variable to env
-            if let Some(value) = variables.get(arg) {
-                unsafe {
-                    std::env::set_var(arg, value.value.as_string());
+            if !is_valid_name(arg) {
+                eprintln!("cerf: export: '{}': not a valid identifier", arg);
+                exit_code = 1;
+                continue;
+            }
+
+            // Export existing: promote existing shell variable to env.
+            match state.get_var_mut(arg) {
+                Some(var) => {
+                    var.exported = true;
+                    let value = var.value.as_string();
+                    unsafe {
+                        std::env::set_var(arg, value);
+                    }
                 }
-            } else {
-                // If not in shell variables but already in env, do nothing
-                // If not in either, bash usually does nothing or adds it to exported list but empty.
-                // For simplicity, we just check env.
-                if std::env::var(arg).is_err() {
-                    // Optional: bash allows 'export FOO' which marks FOO as exported even if not set.
-                    // We'll skip that for now or just set as empty.
+                None => {
+                    // Bash allows `export FOO` before assigning FOO. Keep an
+                    // empty exported shell variable so a later assignment
+                    // updates the environment.
+                    let mut var = Variable::new_string(String::new());
+                    var.exported = true;
+                    state.set_var(arg, var);
                 }
             }
         }
     }
+
+    exit_code
 }

@@ -1,5 +1,5 @@
 use crate::builtins::registry::CommandInfo;
-use crate::engine::state::{ExecutionResult, ShellState, VarValue, Variable};
+use crate::engine::state::{ExecutionResult, ShellState, VarValue, Variable, is_valid_name};
 
 pub const COMMAND_INFO_DECLARE: CommandInfo = CommandInfo {
     name: "env.declare",
@@ -46,6 +46,7 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
         return 0;
     }
 
+    let mut exit_code = 0;
     for target in targets {
         let mut name = target.as_str();
         let mut value_str = None;
@@ -55,8 +56,23 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
             value_str = Some(&target[eq_pos + 1..]);
         }
 
+        if !is_valid_name(name) {
+            eprintln!("cerf: declare: '{}': not a valid identifier", name);
+            exit_code = 1;
+            continue;
+        }
+
         // If not creating new, inherit old
         let old_var = state.get_var(name).cloned();
+
+        // A readonly variable may not be reassigned. The old code set the
+        // flag first and then rejected every `declare -r name=value`, even
+        // when the variable did not exist.
+        if value_str.is_some() && old_var.as_ref().is_some_and(|var| var.readonly) {
+            eprintln!("cerf: declare: {}: readonly variable", name);
+            exit_code = 1;
+            continue;
+        }
 
         let mut var = old_var.unwrap_or_else(|| Variable::new_string(String::new()));
 
@@ -66,18 +82,11 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
         if make_integer {
             var.integer = true;
         }
-        if make_readonly {
-            var.readonly = true;
-        }
         if make_export {
             var.exported = true;
         }
 
         if let Some(val) = value_str {
-            if var.readonly {
-                eprintln!("cerf: declare: {}: readonly variable", name);
-                return 1;
-            }
             if make_array || matches!(var.value, VarValue::Array(_)) {
                 // very simple array parsing: (1 2 3)
                 let val_trim = val.trim();
@@ -94,6 +103,10 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
             }
         }
 
+        if make_readonly {
+            var.readonly = true;
+        }
+
         if var.exported {
             unsafe {
                 std::env::set_var(name, var.value.as_string());
@@ -107,5 +120,5 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
         }
     }
 
-    0
+    exit_code
 }
