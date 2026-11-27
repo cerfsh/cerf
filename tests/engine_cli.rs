@@ -570,8 +570,12 @@ fn inline_comments_are_not_arguments() {
         .expect("run cerf");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
 
+    // `/etc/passwd` exists only on Unix, so use an absolute path this test creates.
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let existing = directory.path().join("existing.txt");
+    std::fs::write(&existing, "").expect("write file");
     let output = cerf()
-        .args(["-c", "test -f /etc/passwd # check"])
+        .args(["-c", &format!("test -f '{}' # check", existing.display())])
         .output()
         .expect("run cerf");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
