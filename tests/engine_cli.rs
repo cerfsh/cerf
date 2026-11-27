@@ -1357,3 +1357,55 @@ fn stat_reports_symlinks_without_following_them() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn ls_handles_symlinks_without_following_them() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let real = directory.path().join("realdir");
+    std::fs::create_dir(&real).expect("real directory");
+    std::fs::write(real.join("x.txt"), b"x").expect("file in real directory");
+    let link = directory.path().join("link");
+    let dangling = directory.path().join("dangling");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink to directory");
+    std::os::unix::fs::symlink("/cerf-definitely-missing", &dangling).expect("dangling symlink");
+
+    let output = cerf()
+        .args(["-c", &format!("ls '{}'", dangling.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("dangling"));
+
+    let output = cerf()
+        .args(["-c", &format!("ls -l '{}'", link.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(" -> "), "stdout: {stdout:?}");
+    assert!(!stdout.contains("x.txt"), "stdout: {stdout:?}");
+
+    let output = cerf()
+        .args(["-c", &format!("ls -F '{}'", link.display())])
+        .output()
+        .expect("run cerf");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("link@"));
+
+    // A symlink loop must not be followed by -R.
+    let top = directory.path().join("up");
+    let nested = top.join("a");
+    std::fs::create_dir_all(&nested).expect("nested directory");
+    std::fs::write(nested.join("x.txt"), b"x").expect("nested file");
+    std::os::unix::fs::symlink(&top, nested.join("up")).expect("loop symlink");
+    let output = cerf()
+        .args(["-c", &format!("ls -R '{}'", top.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("up/up"),
+        "recursion followed a symlink: {stdout:?}"
+    );
+}

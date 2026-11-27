@@ -49,7 +49,7 @@ pub fn runner_inner<W: std::io::Write, E: std::io::Write>(
             target.clone()
         };
 
-        if !path.exists() {
+        if fs::symlink_metadata(&path).is_err() {
             let _ = writeln!(
                 stderr,
                 "cerf: fs.ls: cannot access '{}': No such file or directory",
@@ -59,7 +59,13 @@ pub fn runner_inner<W: std::io::Write, E: std::io::Write>(
             continue;
         }
 
-        if path.is_dir() {
+        // A command-line symlink to a directory is followed by default, but
+        // `-l` and `-F` operate on the link itself. Recursion never follows
+        // symlinked directories (handled below).
+        let follows_to_directory = fs::metadata(&path)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if follows_to_directory && !parsed_args.long_format && !parsed_args.classify {
             if multiple {
                 if !first_dir {
                     let _ = writeln!(stdout);
@@ -122,7 +128,12 @@ pub fn runner_inner<W: std::io::Write, E: std::io::Write>(
                     if parsed_args.recursive {
                         let mut subdirs = Vec::new();
                         for (p, n) in &dir_entries {
-                            if p.is_dir() && n != "." && n != ".." {
+                            // Never descend through a symlink, or `-R` can
+                            // loop until the path length limit.
+                            let is_real_dir = fs::symlink_metadata(p)
+                                .map(|metadata| metadata.file_type().is_dir())
+                                .unwrap_or(false);
+                            if is_real_dir && n != "." && n != ".." {
                                 let child_target =
                                     if target.ends_with('/') || target.ends_with('\\') {
                                         format!("{}{}", target, n)
