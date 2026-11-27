@@ -545,6 +545,7 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Read;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
