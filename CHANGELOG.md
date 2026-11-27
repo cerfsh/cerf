@@ -14,6 +14,57 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- Inline `#` comments are stripped outside quotes at a word boundary, so
+  `echo hi # comment` no longer passes `#` and `comment` to the command (#34).
+- Quoting is tracked per word segment, so partially quoted glob characters stay
+  literal: `"file[1]".txt` names that file instead of matching `file1.txt`
+  (#64).
+- Redirections understand descriptor numbers and duplication: `2>file`,
+  `2>>file`, arbitrary `N>`/`N<`, and `2>&1` now work, and `cmd >a >b` opens
+  both files before leaving output on `b` (#66).
+- `~` expansion no longer collapses `..` lexically, so redirects and command
+  paths through symlinks resolve the way the kernel does (#65).
+- `&` backgrounds `if`, `for`, `while`, `loop`, and function calls instead of
+  running them synchronously; the job is registered and `[1] pid` is printed
+  (#27).
+- Function calls keep their arguments, prefix assignments, and redirections,
+  and functions can be used as pipeline elements; arguments are available as
+  the positional parameters for the duration of the call (#28).
+- `exit N` uses its numeric status, a bare `exit` uses the last command's
+  status, and the interactive REPL returns that status (#29).
+- Positional parameters work: `$1`, `$#`, `$@`, and `$*` expand, `set --`
+  populates them, and `shift` (including `shift 0`) updates them (#40).
+- Prefix assignments (`IFS=: read a b`, `VAR=x builtin`) apply to in-process
+  builtins and functions and are restored afterwards (#42).
+- `read` splits on multi-byte `IFS` characters without panicking on a UTF-8
+  boundary (#30).
+- `touch` updates atime/mtime with `utimensat`, never blocks on FIFOs, and
+  works on directories and read-only files (#31).
+- `rm` unlinks dangling symlinks and symlinks to directories instead of
+  reporting them missing or using `remove_dir` (#33).
+- `declare -r name=value` creates the variable, and readonly variables can no
+  longer be reassigned, unset, or changed through `export` (#35).
+- Invalid environment names in `declare`, `export`, and `unset` are rejected
+  with a diagnostic instead of panicking (#36).
+- `export NAME=value` marks the shell variable as exported, so later
+  assignments update the process environment as well (#37).
+- A bare `exec` is a no-op, and exec'd programs start with default signal
+  dispositions so Ctrl-C and Ctrl-Z work (#38).
+- Bare `fg`/`bg` fall back to the newest live job when the remembered current
+  job has exited (#39).
+- `sys.command` runs externals through the normal spawn path, giving them
+  signal defaults, a process group, and terminal hand-off (#41).
+- Builtins report stdout write errors (including `EPIPE`) instead of panicking
+  the shell, covering `io.echo`, `io.printf`, `fs.du`, `fs.df`, `fs.stat`, and
+  the pager builtins (#43).
+- The shell starts with non-UTF-8 environment variables and arguments by
+  converting them lossily instead of panicking (#32).
+- `--internal-builtin` only removes a state snapshot that carries Cerf's magic
+  header, so an inherited `CERF_INTERNAL_STATE` can no longer delete an
+  unrelated file (#67).
+
 ## [0.3.1] - 2026-11-25
 
 The correctness release: variable expansion, redirects, job control, and globbing
