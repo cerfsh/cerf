@@ -455,13 +455,10 @@ fn directory_read_path(file: &File, _candidate: &Path) -> PathBuf {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn directory_read_path(file: &File, candidate: &Path) -> PathBuf {
-    use std::os::fd::AsRawFd;
-    let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
-    if path.exists() {
-        path
-    } else {
-        candidate.to_path_buf()
-    }
+    // macOS cannot reopen a directory through /dev/fd: the entry exists, but
+    // opening it fails with ENOTDIR. List the path the open handle resolves
+    // to instead, falling back to the verified candidate.
+    platform_opened_path(file).unwrap_or_else(|| candidate.to_path_buf())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
