@@ -1440,24 +1440,28 @@ fn path_search_skips_non_executable_files() {
 #[test]
 fn tilde_expands_for_arguments_assignments_and_globs() {
     let home = tempfile::tempdir().expect("temporary home");
-    std::fs::write(home.path().join("visible.txt"), b"x").expect("visible file");
-    let visible = std::fs::canonicalize(home.path().join("visible.txt")).expect("canonical file");
+    // macOS reports temporary directories under /var, which resolves through
+    // the /private/var symlink. Use the canonical path for HOME so the
+    // expected output is identical on every platform.
+    let home_dir = home.path().canonicalize().expect("canonical home");
+    std::fs::write(home_dir.join("visible.txt"), b"x").expect("visible file");
+    let visible = home_dir.join("visible.txt");
 
     let output = cerf()
         .args(["-c", "/bin/echo ~"])
-        .env("HOME", home.path())
+        .env("HOME", &home_dir)
         .output()
         .expect("run cerf");
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim_end(),
-        home.path().canonicalize().unwrap().to_string_lossy()
+        home_dir.to_string_lossy()
     );
 
     // Globbing happens after tilde expansion.
     let output = cerf()
         .args(["-c", "io.echo ~/visible*"])
-        .env("HOME", home.path())
+        .env("HOME", &home_dir)
         .output()
         .expect("run cerf");
     assert!(output.status.success());
@@ -1469,7 +1473,7 @@ fn tilde_expands_for_arguments_assignments_and_globs() {
     // Assignments expand a leading tilde too.
     let output = cerf()
         .args(["-c", "X=~/visible.txt; io.echo \"$X\""])
-        .env("HOME", home.path())
+        .env("HOME", &home_dir)
         .output()
         .expect("run cerf");
     assert!(output.status.success());
@@ -1481,7 +1485,7 @@ fn tilde_expands_for_arguments_assignments_and_globs() {
     // Quoted tildes stay literal.
     let output = cerf()
         .args(["-c", "io.echo \"~\" '~'"])
-        .env("HOME", home.path())
+        .env("HOME", &home_dir)
         .output()
         .expect("run cerf");
     assert!(output.status.success());
