@@ -28,7 +28,23 @@ pub fn expand_vars(
             // ${VAR} style
             Some('{') => {
                 chars.next(); // consume '{'
-                let var_name: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                let mut var_name = String::new();
+                let mut closed = false;
+                for c in chars.by_ref() {
+                    if c == '}' {
+                        closed = true;
+                        break;
+                    }
+                    var_name.push(c);
+                }
+                if !closed {
+                    // The parser rejects this before execution; keep the text
+                    // intact for any programmatic caller instead of dropping
+                    // the rest of the input.
+                    result.push_str("${");
+                    result.push_str(&var_name);
+                    continue;
+                }
                 let value = shell_vars
                     .get(&var_name)
                     .map(|v| v.value.as_string())
@@ -156,6 +172,12 @@ mod tests {
         let vars = std::collections::HashMap::new();
         assert_eq!(expand_vars("$CERF_UNDEFINED_XYZ", &vars), "");
         assert_eq!(expand_vars("${CERF_UNDEFINED_XYZ}", &vars), "");
+    }
+
+    #[test]
+    fn test_unterminated_braced_variable_is_preserved() {
+        let vars = std::collections::HashMap::new();
+        assert_eq!(expand_vars("echo ${HOME", &vars), "echo ${HOME");
     }
 
     #[test]

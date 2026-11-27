@@ -59,9 +59,11 @@ pub fn is_incomplete(input: &str) -> bool {
         return true;
     }
 
-    // 3. Unbalanced braces (skip characters inside quotes).
+    // 3. Unbalanced braces (skip characters inside quotes). A `#` only starts
+    // a comment at a word boundary, so `a#b` keeps its literal `#`.
     let mut depth: i32 = 0;
     let mut chars = s.chars().peekable();
+    let mut at_word_start = true;
     while let Some(ch) = chars.next() {
         match ch {
             '"' => {
@@ -70,6 +72,7 @@ pub fn is_incomplete(input: &str) -> bool {
                         break;
                     }
                 }
+                at_word_start = false;
             }
             '\'' => {
                 for c in chars.by_ref() {
@@ -77,21 +80,75 @@ pub fn is_incomplete(input: &str) -> bool {
                         break;
                     }
                 }
+                at_word_start = false;
             }
-            '#' => {
-                // skip line comments
+            '#' if at_word_start => {
+                // Skip the line comment; the next line starts a new word.
                 for c in chars.by_ref() {
                     if c == '\n' {
                         break;
                     }
                 }
+                at_word_start = true;
             }
-            '{' => depth += 1,
-            '}' => depth -= 1,
-            _ => {}
+            '{' => {
+                depth += 1;
+                at_word_start = true;
+            }
+            '}' => {
+                depth -= 1;
+                at_word_start = true;
+            }
+            '\n' | ' ' | '\t' | '\r' | ';' | '&' | '|' | '(' | ')' => {
+                at_word_start = true;
+            }
+            _ => at_word_start = false,
         }
     }
     depth > 0
+}
+
+/// Verify that every active `${` (outside single quotes) has a closing `}`.
+///
+/// Expansion happens at execution time, so without this check the parser would
+/// accept `echo ${HOME` and the expander would silently consume the rest of
+/// the line. Report it as a syntax error instead.
+fn validate_braced_expansions(input: &str) -> Result<(), String> {
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '$' if !in_single && chars.peek() == Some(&'{') => {
+                chars.next();
+                let mut closed = false;
+                while let Some(next) = chars.next() {
+                    if next == '}' {
+                        closed = true;
+                        break;
+                    }
+                    if next == '\n' {
+                        break;
+                    }
+                }
+                if !closed {
+                    return Err("bad substitution: missing '}'".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 /// True when every line is blank or a `#` comment. Used to distinguish
@@ -202,6 +259,11 @@ pub fn parse_input(
         return None;
     }
 
+    if let Err(message) = validate_braced_expansions(s) {
+        eprintln!("cerf: syntax error: {}", message);
+        return None;
+    }
+
     match combinators::parse_command_list(s) {
         Ok((rem, entries)) => {
             if !rem.trim().is_empty() {
@@ -297,6 +359,16 @@ mod tests {
         assert!(parse_line("   # comment indented").is_none());
         assert!(is_blank_or_comment_only("# one\n   # two\n"));
         assert!(!is_blank_or_comment_only("# comment\necho hi"));
+    }
+
+    #[test]
+    fn test_unterminated_braced_variable_is_a_syntax_error() {
+        let vars = std::collections::HashMap::new();
+        assert!(parse_pipeline("echo ${HOME", &vars).is_none());
+        assert!(parse_pipeline("echo ${HOME; /bin/echo tail", &vars).is_none());
+        // Quoted or escaped `${` stays literal data and is not an error.
+        assert!(parse_pipeline("echo '${HOME'", &vars).is_some());
+        assert!(parse_pipeline("echo \\${HOME", &vars).is_some());
     }
 
     #[test]
@@ -754,6 +826,15 @@ mod tests {
     fn test_incomplete_trailing_comma() {
         assert!(is_incomplete("echo hello,"));
         assert!(!is_incomplete("echo hello"));
+    }
+
+    #[test]
+    fn test_incomplete_ignores_hash_inside_word() {
+        assert!(!is_incomplete("if test.true { io.echo a#b }"));
+        assert!(!is_incomplete("io.echo a#b"));
+        // A `#` at a word boundary still starts a comment.
+        assert!(is_incomplete("if test.true { # start of block"));
+        assert!(!is_incomplete("if test.true { io.echo hi # comment\n}"));
     }
 
     #[test]
