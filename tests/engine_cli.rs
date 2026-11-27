@@ -1409,3 +1409,29 @@ fn ls_handles_symlinks_without_following_them() {
         "recursion followed a symlink: {stdout:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn path_search_skips_non_executable_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let bad = directory.path().join("bad");
+    let good = directory.path().join("good");
+    std::fs::create_dir(&bad).expect("bad directory");
+    std::fs::create_dir(&good).expect("good directory");
+    std::fs::write(bad.join("prog"), "not executable\n").expect("bad program");
+    let program = good.join("prog");
+    std::fs::write(&program, "#!/bin/sh\necho GOOD\n").expect("good program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make executable");
+
+    let path = format!("{}:{}", bad.display(), good.display());
+    let output = cerf()
+        .args(["-c", "prog"])
+        .env("PATH", path)
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "GOOD\n");
+}

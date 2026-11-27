@@ -52,7 +52,14 @@ pub fn find_executable(cmd: &str) -> Option<PathBuf> {
 fn check_path(p: PathBuf) -> Option<PathBuf> {
     #[cfg(unix)]
     {
-        if p.is_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A non-executable file earlier in PATH must not shadow a real
+        // executable later in the list.
+        if let Ok(metadata) = p.metadata()
+            && metadata.is_file()
+            && metadata.permissions().mode() & 0o111 != 0
+        {
             return Some(p);
         }
     }
