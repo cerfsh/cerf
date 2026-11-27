@@ -24,7 +24,7 @@ chrono = "0.4.39"
 reqwest = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.7", features = ["fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 url = "2.5.8"
 hickory-resolver = "0.25"
 
@@ -40,6 +40,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_IO",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_SystemServices",
 ] }
 

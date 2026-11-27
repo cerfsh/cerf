@@ -2,16 +2,17 @@ use crate::builtins::net::{addr, runtime};
 use crate::engine::{ExecutionResult, ShellState};
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{OriginalUri, Request, State};
+use axum::extract::{OriginalUri, State};
 use axum::http::{StatusCode, header};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
+use std::fs::File;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tokio_util::io::ReaderStream;
 
 pub const COMMAND_INFO: crate::builtins::registry::CommandInfo =
     crate::builtins::registry::CommandInfo {
@@ -120,78 +121,291 @@ async fn serve(options: HttpOptions) -> Result<(), String> {
 }
 
 fn router(root: Arc<PathBuf>) -> Router {
-    let listing = Router::new()
-        .fallback(get(list_directory))
-        .with_state(Arc::clone(&root));
-    let service = ServeDir::new(root.as_path()).fallback(listing);
     Router::new()
-        .fallback_service(service)
-        .layer(middleware::from_fn_with_state(root, validate_root_path))
+        .fallback(get(serve_request))
+        .with_state(root)
 }
 
-async fn validate_root_path(
-    State(root): State<Arc<PathBuf>>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let path = request.uri().path().to_string();
-    let allowed = tokio::task::spawn_blocking(move || request_allowed(&root, &path))
-        .await
-        .unwrap_or(false);
-    if !allowed {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    next.run(request).await
-}
-
-fn request_allowed(root: &Path, request_path: &str) -> bool {
-    let Some(resolved) = resolve_path(root, request_path) else {
-        return false;
-    };
-    if !resolved.is_dir() {
-        return true;
-    }
-
-    // ServeDir appends index.html to directory requests, so validate the
-    // implicitly selected file just like an explicit request path.
-    match std::fs::symlink_metadata(resolved.join("index.html")) {
-        Ok(_) => {
-            let index_path = format!("{}/index.html", request_path.trim_end_matches('/'));
-            resolve_path(root, &index_path).is_some()
-        }
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-    }
-}
-
-async fn list_directory(
+/// Resolve and open the target exactly once.
+///
+/// The request path is never re-resolved after this point: files are streamed
+/// from the already-open handle, so replacing the path with a symlink while
+/// the request is in flight cannot redirect the response outside ROOT.
+async fn serve_request(
     State(root): State<Arc<PathBuf>>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let path = uri.path().to_string();
-    match tokio::task::spawn_blocking(move || directory_listing(&root, &path)).await {
-        Ok(response) => response,
+    let request_path = uri.path().to_string();
+    let root = Arc::clone(&root);
+    match tokio::task::spawn_blocking(move || open_request(&root, &request_path)).await {
+        Ok(Ok(Served::File { file, path, len })) => {
+            let content_type = content_type(&path);
+            let stream = ReaderStream::new(tokio::fs::File::from_std(file));
+            let mut response = (StatusCode::OK, Body::from_stream(stream)).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static(content_type),
+            );
+            if let Ok(length) = header::HeaderValue::from_str(&len.to_string()) {
+                response.headers_mut().insert(header::CONTENT_LENGTH, length);
+            }
+            response
+        }
+        Ok(Ok(Served::Listing(html))) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            Body::from(html),
+        )
+            .into_response(),
+        Ok(Ok(Served::Redirect(location))) => Redirect::permanent(&location).into_response(),
+        Ok(Err(status)) => status.into_response(),
         Err(error) => {
-            eprintln!("net.http: directory listing task failed: {}", error);
+            eprintln!("net.http: request task failed: {}", error);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
 
-fn directory_listing(root: &Path, request_path: &str) -> Response {
-    let Some(directory) = resolve_path(root, request_path) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if !directory.is_dir() {
-        return StatusCode::NOT_FOUND.into_response();
+enum Served {
+    File {
+        file: File,
+        path: PathBuf,
+        len: u64,
+    },
+    Listing(String),
+    Redirect(String),
+}
+
+fn open_request(root: &Path, request_path: &str) -> Result<Served, StatusCode> {
+    let candidate = request_candidate(root, request_path).ok_or(StatusCode::NOT_FOUND)?;
+    let file = open_verified(root, &candidate).map_err(status_for_error)?;
+    let metadata = file.metadata().map_err(status_for_error)?;
+
+    if !metadata.is_dir() {
+        return Ok(Served::File {
+            file,
+            path: candidate,
+            len: metadata.len(),
+        });
     }
 
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) => {
-            eprintln!("net.http: cannot list {}: {}", directory.display(), error);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    if !request_path.ends_with('/') {
+        return Ok(Served::Redirect(format!("{}/", request_path)));
+    }
+
+    // ServeDir used to append index.html to directory requests. Open it
+    // through the same confinement check so a symlinked index cannot escape.
+    let index = candidate.join("index.html");
+    match std::fs::symlink_metadata(&index) {
+        Ok(_) => {
+            let index_file = match open_verified(root, &index) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // The index disappeared between the check and the open;
+                    // fall back to a listing.
+                    let html = directory_listing(&file, &candidate, request_path)
+                        .map_err(status_for_error)?;
+                    return Ok(Served::Listing(html));
+                }
+                Err(_) => {
+                    // An index that resolves outside ROOT must not fall back
+                    // to a listing, so the request fails as a whole.
+                    return Err(StatusCode::NOT_FOUND);
+                }
+            };
+            let index_metadata = index_file.metadata().map_err(status_for_error)?;
+            if index_metadata.is_dir() {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            return Ok(Served::File {
+                file: index_file,
+                path: index,
+                len: index_metadata.len(),
+            });
         }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    }
+
+    let html = directory_listing(&file, &candidate, request_path).map_err(status_for_error)?;
+    Ok(Served::Listing(html))
+}
+
+fn status_for_error(error: io::Error) -> StatusCode {
+    match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Open a candidate path and verify the *opened handle* still resolves inside
+/// ROOT. Checking the handle rather than the path removes the race between
+/// validation and use.
+fn open_verified(root: &Path, candidate: &Path) -> io::Result<File> {
+    let file = open_candidate(candidate)?;
+    let resolved = opened_path(&file, candidate).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cannot determine the opened file's path",
+        )
+    })?;
+    if path_is_beneath(root, &resolved) {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "path escapes the served root",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn open_candidate(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(windows)]
+fn open_candidate(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_BACKUP_SEMANTICS lets us open directories as well as files;
+    // the directory or file is then pinned by the returned handle.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_candidate(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// Path of an open handle, used to verify confinement after opening.
+fn opened_path(file: &File, candidate: &Path) -> Option<PathBuf> {
+    platform_opened_path(file).or_else(|| candidate.canonicalize().ok())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_opened_path(file: &File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    let link = format!("/proc/self/fd/{}", file.as_raw_fd());
+    let mut path = std::fs::read_link(link).ok()?;
+    // A file that was unlinked after opening is still servable; drop the
+    // kernel's marker before comparing it with ROOT.
+    if let Some(stripped) = path.to_string_lossy().strip_suffix(" (deleted)") {
+        path = PathBuf::from(stripped);
+    }
+    Some(path)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn platform_opened_path(file: &File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    let mut buffer = [0i8; nix::libc::PATH_MAX as usize];
+    let result = unsafe {
+        nix::libc::fcntl(
+            file.as_raw_fd(),
+            nix::libc::F_GETPATH,
+            buffer.as_mut_ptr(),
+        )
     };
+    if result == -1 {
+        return None;
+    }
+    let bytes: Vec<u8> = buffer
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8)
+        .collect();
+    String::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos", target_os = "ios"))))]
+fn platform_opened_path(file: &File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/dev/fd/{}", file.as_raw_fd())).ok()
+}
+
+#[cfg(windows)]
+fn platform_opened_path(file: &File) -> Option<PathBuf> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    let handle = file.as_raw_handle() as _;
+    let needed = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; needed as usize + 1];
+    let written = unsafe {
+        GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
+    };
+    if written == 0 || written as usize >= buffer.len() {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..written as usize]);
+    let path = path.strip_prefix(r"\\?\").unwrap_or(&path);
+    Some(PathBuf::from(path))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_opened_path(_file: &File) -> Option<PathBuf> {
+    None
+}
+
+/// True when `path` is `root` itself or lies beneath it.
+#[cfg(windows)]
+fn path_is_beneath(root: &Path, path: &Path) -> bool {
+    let root = root.to_string_lossy().to_lowercase();
+    let path = path.to_string_lossy().to_lowercase();
+    if !path.starts_with(&root) {
+        return false;
+    }
+    path.len() == root.len()
+        || root.ends_with('\\')
+        || path.as_bytes().get(root.len()) == Some(&b'\\')
+}
+
+#[cfg(not(windows))]
+fn path_is_beneath(root: &Path, path: &Path) -> bool {
+    path.starts_with(root)
+}
+
+/// Build the path for a request, rejecting traversal and platform-sensitive
+/// separators. The result is not canonicalized; confinement is enforced on
+/// the opened handle instead.
+fn request_candidate(root: &Path, request_path: &str) -> Option<PathBuf> {
+    let mut candidate = root.to_path_buf();
+    for segment in request_segments(request_path)? {
+        candidate.push(segment);
+    }
+    Some(candidate)
+}
+
+fn request_segments(request_path: &str) -> Option<Vec<String>> {
+    let decoded = percent_decode(request_path)?;
+    if decoded.contains('\0') || decoded.contains('\\') {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    for segment in decoded.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." || segment.contains(':') {
+            return None;
+        }
+        segments.push(segment.to_string());
+    }
+    Some(segments)
+}
+
+/// List directory entries from an already-open directory handle.
+fn directory_listing(file: &File, candidate: &Path, request_path: &str) -> io::Result<String> {
+    let read_path = directory_read_path(file, candidate);
+    let entries = std::fs::read_dir(read_path)?;
 
     let mut names = Vec::new();
     for entry in entries.flatten() {
@@ -222,34 +436,56 @@ fn directory_listing(root: &Path, request_path: &str) -> Response {
         ));
     }
     html.push_str("</ul></body></html>");
-
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        Body::from(html),
-    )
-        .into_response()
+    Ok(html)
 }
 
-fn resolve_path(root: &Path, request_path: &str) -> Option<PathBuf> {
-    let decoded = percent_decode(request_path)?;
-    if decoded.contains('\0') || decoded.contains('\\') {
-        return None;
-    }
+/// A path that refers to the already-open directory itself, when the platform
+/// offers one. Falls back to the validated candidate path.
+#[cfg(target_os = "linux")]
+fn directory_read_path(file: &File, _candidate: &Path) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
 
-    let mut candidate = root.to_path_buf();
-    for segment in decoded.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." || segment.contains(':') {
-            return None;
-        }
-        candidate.push(segment);
-    }
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn directory_read_path(file: &File, candidate: &Path) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+    if path.exists() { path } else { candidate.to_path_buf() }
+}
 
-    let canonical = candidate.canonicalize().ok()?;
-    canonical.starts_with(root).then_some(canonical)
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+fn directory_read_path(_file: &File, candidate: &Path) -> PathBuf {
+    candidate.to_path_buf()
+}
+
+fn content_type(path: &Path) -> &'static str {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" => "application/json",
+        "txt" | "md" | "log" => "text/plain; charset=utf-8",
+        "xml" => "application/xml",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "pdf" => "application/pdf",
+        "wasm" => "application/wasm",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -303,9 +539,17 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    #[cfg(test)]
+    fn resolve_path(root: &Path, request_path: &str) -> Option<PathBuf> {
+        let candidate = request_candidate(root, request_path)?;
+        let canonical = candidate.canonicalize().ok()?;
+        canonical.starts_with(root).then_some(canonical)
+    }
 
     #[test]
     fn resolves_paths_inside_root_only() {
@@ -325,6 +569,27 @@ mod tests {
         assert_eq!(resolve_path(&root, "/%2e%2e/"), None);
         assert_eq!(resolve_path(&root, "/%5c..%5c"), None);
         assert_eq!(resolve_path(&root, "/missing"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_handle_stays_inside_root_after_a_path_swap() {
+        let directory = tempdir().expect("temporary directory");
+        let outside = tempdir().expect("outside directory");
+        let root = directory.path().canonicalize().expect("canonical root");
+        let safe = root.join("safe.txt");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&safe, b"safe").expect("safe file");
+        std::fs::write(&secret, b"secret").expect("secret file");
+
+        let mut file = open_verified(&root, &safe).expect("open safe file");
+        std::fs::remove_file(&safe).expect("remove safe file");
+        std::os::unix::fs::symlink(&secret, &safe).expect("swap with symlink");
+
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).expect("read handle");
+        assert_eq!(contents, "safe");
+        assert!(open_verified(&root, &safe).is_err());
     }
 
     #[tokio::test]
