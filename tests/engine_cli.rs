@@ -559,3 +559,506 @@ fn glob_does_not_match_dotfiles_unless_asked() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim(), ".env", "stdout was {stdout:?}");
 }
+
+// ── Regression tests for the medium-severity issue batch ───────────────────
+
+#[test]
+fn inline_comments_are_not_arguments() {
+    let output = cerf()
+        .args(["-c", "io.echo hi # comment"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
+
+    let output = cerf()
+        .args(["-c", "test -f /etc/passwd # check"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    // A `#` inside a word or quotes is literal.
+    let output = cerf()
+        .args(["-c", "io.echo hi#there"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi#there\n");
+
+    let output = cerf()
+        .args(["-c", "io.echo \"hi # there\""])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi # there\n");
+
+    let output = cerf()
+        .args(["-c", "io.echo one # comment\nio.echo two"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "one\ntwo\n");
+}
+
+#[test]
+fn read_handles_a_multibyte_ifs_delimiter() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = cerf()
+        .args(["-c", "IFS=é\nread a b\nio.echo \"$a|$b\""])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn cerf");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all("xéy\n".as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "x|y\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn touch_updates_timestamps_and_supports_special_files() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let file = directory.path().join("f");
+    std::fs::write(&file, "x").expect("write file");
+
+    let old = UNIX_EPOCH + Duration::from_secs(946_659_600);
+    std::fs::File::open(&file)
+        .expect("open file")
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(old)
+                .set_modified(old),
+        )
+        .expect("set old timestamps");
+
+    let output = cerf()
+        .args(["-c", &format!("touch '{}'", file.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    let modified = std::fs::metadata(&file)
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    assert!(modified > old, "touch did not update the modification time");
+
+    // Directories must work without opening them for writing.
+    let dir = directory.path().join("d");
+    std::fs::create_dir(&dir).expect("create dir");
+    let output = cerf()
+        .args(["-c", &format!("touch '{}'", dir.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+
+    // A FIFO must not block waiting for a reader.
+    let fifo = directory.path().join("p");
+    if Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        let output = Command::new("timeout")
+            .arg("5")
+            .arg(env!("CARGO_BIN_EXE_cerf"))
+            .args(["-c", &format!("touch '{}'", fifo.display())])
+            .output();
+        if let Ok(output) = output
+            && output.status.code() != Some(127)
+        {
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rm_removes_dangling_and_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let dangling = directory.path().join("dangling");
+    let real = directory.path().join("realdir");
+    let link = directory.path().join("link");
+    std::fs::create_dir(&real).expect("create real directory");
+    symlink("/nonexistent-cerf-target", &dangling).expect("create dangling link");
+    symlink(&real, &link).expect("create directory link");
+
+    let command = format!("rm '{}' '{}'", dangling.display(), link.display());
+    let output = cerf().args(["-c", &command]).output().expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert!(std::fs::symlink_metadata(&dangling).is_err());
+    assert!(std::fs::symlink_metadata(&link).is_err());
+    assert!(real.exists(), "the symlink target must survive");
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_environment_and_arguments_do_not_panic() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let output = cerf()
+        .env(
+            OsString::from_vec(b"CERF_BAD_VALUE".to_vec()),
+            OsString::from_vec(b"\xff\xfe".to_vec()),
+        )
+        .args(["-c", "io.echo ok"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+
+    let output = cerf()
+        .arg("-c")
+        .arg(OsString::from_vec(b"io.echo \xff".to_vec()))
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.status.code() != Some(101));
+}
+
+#[test]
+fn partially_quoted_words_are_not_glob_expanded() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("file[1].txt"), "").expect("write bracket file");
+    std::fs::write(directory.path().join("file1.txt"), "").expect("write plain file");
+
+    let output = cerf()
+        .args(["-c", "io.echo \"file[1]\".txt"])
+        .current_dir(directory.path())
+        .output()
+        .expect("run cerf");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "file[1].txt"
+    );
+
+    let output = cerf()
+        .args(["-c", "io.echo \"*\".txt"])
+        .current_dir(directory.path())
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "*.txt");
+}
+
+#[cfg(unix)]
+#[test]
+fn descriptor_redirects_and_duplication_work() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let two = directory.path().join("two.txt");
+    let output = cerf()
+        .args(["-c", &format!("/bin/echo 2>'{}'", two.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&two).unwrap(), "");
+
+    let all = directory.path().join("all.txt");
+    let output = cerf()
+        .args([
+            "-c",
+            &format!(
+                "/bin/sh -c 'echo out; echo err >&2' >'{}' 2>&1",
+                all.display()
+            ),
+        ])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&all).unwrap(), "out\nerr\n");
+
+    let first = directory.path().join("first.txt");
+    let second = directory.path().join("second.txt");
+    let output = cerf()
+        .args([
+            "-c",
+            &format!(
+                "/bin/echo hi >'{}' >'{}'",
+                first.display(),
+                second.display()
+            ),
+        ])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "");
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "hi\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn home_expansion_does_not_collapse_parent_through_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::create_dir_all(directory.path().join("real/sub")).expect("create directories");
+    symlink("real/sub", directory.path().join("link")).expect("create symlink");
+
+    let output = cerf()
+        .args(["-c", "/bin/echo hi > link/../cerf.txt"])
+        .current_dir(directory.path())
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert!(directory.path().join("real/cerf.txt").exists());
+    assert!(!directory.path().join("cerf.txt").exists());
+}
+
+#[test]
+fn positional_parameters_and_shift_work() {
+    let output = cerf()
+        .args(["-c", "set -- a b; shift; io.echo \"$1:$#:$*\""])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "b:1:b\n");
+
+    let output = cerf()
+        .args(["-c", "set -- a b; io.echo \"$1\""])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a\n");
+
+    let output = cerf()
+        .args(["-c", "set -- a b; shift 0; io.echo \"$1:$#\""])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a:2\n");
+}
+
+#[test]
+fn function_calls_keep_arguments_redirects_and_pipelines() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let out = directory.path().join("out.txt");
+    let output = cerf()
+        .args([
+            "-c",
+            &format!("func f {{ io.echo hi }}; f >'{}'", out.display()),
+        ])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "hi\n");
+
+    let output = cerf()
+        .args(["-c", "func g { io.echo \"$1:$#\" }; g one two"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "one:2\n");
+
+    let output = cerf()
+        .args(["-c", "func h { io.echo hi }; h | cat"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
+}
+
+#[test]
+fn prefix_assignments_apply_to_in_process_builtins() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = cerf()
+        .args(["-c", "IFS=: read X Y; io.echo \"$X|$Y\""])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn cerf");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"a:b\n")
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a|b\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn background_control_flow_blocks_return_immediately() {
+    use std::time::{Duration, Instant};
+
+    for script in [
+        "if true { /bin/sleep 2 } &",
+        "for x in a b { /bin/sleep 2 } &",
+        "while true { /bin/sleep 2 } &",
+        "loop { /bin/sleep 2 } &",
+        "func f { /bin/sleep 2 }; f &",
+    ] {
+        // A background child inherits stdout and keeps a pipe open until it
+        // exits, so `Command::output()` would wait for it. Redirect to a file
+        // and watch the shell process itself.
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let stdout_path = directory.path().join("stdout.txt");
+        let stdout = std::fs::File::create(&stdout_path).expect("create stdout file");
+        let started = Instant::now();
+        let status = cerf()
+            .args(["-c", script])
+            .stdout(std::process::Stdio::from(stdout))
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run cerf");
+        assert!(status.success(), "{script}: {status:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "{script}: ran synchronously ({:?})",
+            started.elapsed()
+        );
+        let stdout = std::fs::read_to_string(&stdout_path).expect("read stdout");
+        assert!(
+            stdout.contains("[1] "),
+            "{script}: no job registration: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn readonly_and_export_attributes_are_consistent() {
+    let output = cerf()
+        .args(["-c", "declare -r R=1"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+
+    let output = cerf()
+        .args(["-c", "declare -r R=1; R=2; io.echo $R"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("readonly"));
+
+    let output = cerf()
+        .args(["-c", "declare -r R=1; unset R; io.echo $R"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("readonly"));
+
+    // A lone readonly assignment is a failing command.
+    let output = cerf()
+        .args(["-c", "declare -r R=1; R=2"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let output = cerf()
+        .args(["-c", "declare -r R=1; unset R"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let output = cerf()
+        .args(["-c", "export FOO=one; declare FOO=two; printenv FOO"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "two\n");
+
+    let output = cerf()
+        .args(["-c", "export FOO=one; FOO=two; printenv FOO"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "two\n");
+}
+
+#[test]
+fn invalid_environment_names_report_errors_instead_of_panicking() {
+    for script in ["declare -x =foo", "unset a=b", "export =foo"] {
+        let output = cerf().args(["-c", script]).output().expect("run cerf");
+        assert_eq!(output.status.code(), Some(1), "{script}: {output:?}");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{script}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn exit_uses_its_numeric_argument_and_last_status() {
+    let output = cerf().args(["-c", "exit 5"]).output().expect("run cerf");
+    assert_eq!(output.status.code(), Some(5));
+
+    let output = cerf()
+        .args(["-c", "false; exit"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(1));
+
+    let output = cerf()
+        .args(["-c", "exec; io.echo after"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "after\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_current_job_does_not_break_the_next_bare_fg() {
+    let output = cerf()
+        .args(["-c", "/bin/sleep 0.1 & fg; /bin/sleep 0.1 & fg"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[1] "), "{stdout:?}");
+    assert!(stdout.contains("[2] "), "{stdout:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn builtins_report_write_errors_instead_of_panicking() {
+    use std::fs::File;
+    use std::process::Stdio;
+
+    if !std::path::Path::new("/dev/full").exists() {
+        return;
+    }
+    for script in ["io.echo hi", "fs.df", "fs.stat /etc/passwd"] {
+        let sink = File::create("/dev/full").expect("open /dev/full");
+        let output = cerf()
+            .args(["-c", script])
+            .stdout(Stdio::from(sink))
+            .output()
+            .expect("run cerf");
+        assert_eq!(output.status.code(), Some(1), "{script}: {output:?}");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{script}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn internal_builtin_snapshot_does_not_delete_an_unrelated_file() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let victim = directory.path().join("victim.txt");
+    std::fs::write(&victim, "keep\n").expect("write victim");
+
+    let output = cerf()
+        .env("CERF_INTERNAL_STATE", &victim)
+        .args(["--internal-builtin", "io.echo", "hi"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("victim should survive"),
+        "keep\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sys_command_runs_external_commands_with_their_status() {
+    let output = cerf()
+        .args(["-c", "sys.command /bin/sh -c 'exit 7'"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+}
