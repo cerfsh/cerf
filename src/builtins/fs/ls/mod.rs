@@ -62,10 +62,15 @@ pub fn runner_inner<W: std::io::Write, E: std::io::Write>(
         // A command-line symlink to a directory is followed by default, but
         // `-l` and `-F` operate on the link itself. Recursion never follows
         // symlinked directories (handled below).
+        let is_symlink = fs::symlink_metadata(&path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
         let follows_to_directory = fs::metadata(&path)
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false);
-        if follows_to_directory && !parsed_args.long_format && !parsed_args.classify {
+        if follows_to_directory
+            && !(is_symlink && (parsed_args.long_format || parsed_args.classify))
+        {
             if multiple {
                 if !first_dir {
                     let _ = writeln!(stdout);
