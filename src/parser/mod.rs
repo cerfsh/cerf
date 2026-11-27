@@ -9,7 +9,7 @@ pub use ast::{
     WordPart,
 };
 pub use combinators::is_reserved_word;
-pub use expand::{expand_arg_in_state, expand_vars_in_state};
+pub use expand::{expand_arg_in_state, expand_vars_in_state, has_unquoted_tilde_prefix};
 
 // ── Public API ────────────────────────────────────────────────────────────
 

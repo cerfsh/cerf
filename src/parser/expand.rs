@@ -118,6 +118,18 @@ pub fn expand_arg(
     result
 }
 
+/// True when the word starts with an unquoted `~` prefix eligible for tilde
+/// expansion. Quoted tildes (`"~"`, `'~'`) stay literal.
+pub fn has_unquoted_tilde_prefix(arg: &crate::parser::Arg) -> bool {
+    arg.parts.first().is_some_and(|part| {
+        part.expand
+            && part.glob
+            && (part.text == "~"
+                || part.text.starts_with("~/")
+                || (cfg!(windows) && part.text.starts_with("~\\")))
+    })
+}
+
 /// Like [`expand_arg`], but resolves variables through local function scopes.
 pub fn expand_arg_in_state(
     arg: &crate::parser::Arg,
@@ -133,6 +145,11 @@ pub fn expand_arg_in_state(
         } else {
             result.push_str(&part.text);
         }
+    }
+    if has_unquoted_tilde_prefix(arg)
+        && let Some(expanded) = crate::engine::path::expand_tilde(&result)
+    {
+        result = expanded;
     }
     result
 }

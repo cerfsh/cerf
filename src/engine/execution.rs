@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use crate::builtins;
 use crate::parser::{
     Arg, CommandEntry, Connector, Pipeline, expand_arg_in_state, expand_vars_in_state,
+    has_unquoted_tilde_prefix,
 };
 #[cfg(unix)]
 use crate::signals;
@@ -51,7 +52,14 @@ fn expand_args(args: &[Arg], state: &ShellState) -> Vec<Arg> {
                 }
             }
 
-            let value = parts.iter().map(|part| part.text.as_str()).collect();
+            let mut value: String = parts.iter().map(|part| part.text.as_str()).collect();
+            if has_unquoted_tilde_prefix(arg)
+                && let Some(first) = parts.first_mut()
+                && let Some(expanded) = crate::engine::path::expand_tilde(&first.text)
+            {
+                first.text = expanded;
+                value = parts.iter().map(|part| part.text.as_str()).collect();
+            }
             Arg {
                 value,
                 quoted: arg.quoted,

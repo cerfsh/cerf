@@ -19,6 +19,16 @@ pub fn expand_home(path_str: &str) -> PathBuf {
     Path::new(path_str).to_path_buf()
 }
 
+/// Expand an unquoted leading `~` to a string, or return `None` when the
+/// value does not start with a tilde prefix.
+pub fn expand_tilde(value: &str) -> Option<String> {
+    if value == "~" || value.starts_with("~/") || (cfg!(windows) && value.starts_with("~\\")) {
+        Some(expand_home(value).to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
 pub fn find_executable(cmd: &str) -> Option<PathBuf> {
     let cmd_path = expand_home(cmd);
 

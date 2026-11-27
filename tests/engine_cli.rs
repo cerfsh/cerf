@@ -1435,3 +1435,55 @@ fn path_search_skips_non_executable_files() {
     assert!(output.status.success(), "status: {:?}", output.status);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "GOOD\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn tilde_expands_for_arguments_assignments_and_globs() {
+    let home = tempfile::tempdir().expect("temporary home");
+    std::fs::write(home.path().join("visible.txt"), b"x").expect("visible file");
+    let visible = std::fs::canonicalize(home.path().join("visible.txt")).expect("canonical file");
+
+    let output = cerf()
+        .args(["-c", "/bin/echo ~"])
+        .env("HOME", home.path())
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        home.path().canonicalize().unwrap().to_string_lossy()
+    );
+
+    // Globbing happens after tilde expansion.
+    let output = cerf()
+        .args(["-c", "io.echo ~/visible*"])
+        .env("HOME", home.path())
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        visible.to_string_lossy()
+    );
+
+    // Assignments expand a leading tilde too.
+    let output = cerf()
+        .args(["-c", "X=~/visible.txt; io.echo \"$X\""])
+        .env("HOME", home.path())
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        visible.to_string_lossy()
+    );
+
+    // Quoted tildes stay literal.
+    let output = cerf()
+        .args(["-c", "io.echo \"~\" '~'"])
+        .env("HOME", home.path())
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "~ ~\n");
+}
