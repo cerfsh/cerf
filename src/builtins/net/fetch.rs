@@ -152,6 +152,12 @@ async fn fetch(options: FetchOptions) -> Result<(), FetchError> {
 }
 
 async fn write_file(response: &mut Response, path: &Path) -> Result<(), FetchError> {
+    // Renaming a temporary file over a device, FIFO, or symlink would replace
+    // the node instead of writing through it. Stream directly in that case.
+    if is_special_destination(path) {
+        return write_file_direct(response, path).await;
+    }
+
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -180,6 +186,31 @@ async fn write_file(response: &mut Response, path: &Path) -> Result<(), FetchErr
             error.error
         ))
     })?;
+    Ok(())
+}
+
+/// True for destinations that must not be replaced by a rename: symlinks,
+/// character/block devices, FIFOs, sockets, and other non-regular entries.
+fn is_special_destination(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type().is_symlink() || !metadata.file_type().is_file(),
+        Err(_) => false,
+    }
+}
+
+async fn write_file_direct(response: &mut Response, path: &Path) -> Result<(), FetchError> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .map_err(|error| {
+            FetchError::message(format!("cannot open {}: {}", path.display(), error))
+        })?;
+
+    copy_response(response, &mut file).await?;
+    file.flush().await?;
     Ok(())
 }
 
@@ -264,6 +295,34 @@ mod tests {
 
         assert!(fetch(options(address, Some(path.clone()))).await.is_err());
         assert_eq!(std::fs::read(path).expect("read output"), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writes_through_special_files_without_replacing_them() {
+        let address = serve_once("200 OK", b"discarded").await;
+        assert!(
+            fetch(options(address, Some(PathBuf::from("/dev/null"))))
+                .await
+                .is_ok()
+        );
+
+        let directory = tempdir().expect("temporary directory");
+        let target = directory.path().join("target.bin");
+        std::fs::write(&target, b"old").expect("seed target");
+        let link = directory.path().join("link.bin");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let address = serve_once("200 OK", b"new").await;
+        assert!(fetch(options(address, Some(link.clone()))).await.is_ok());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "the symlink was replaced"
+        );
+        assert_eq!(std::fs::read(target).expect("read target"), b"new");
     }
 
     #[test]
