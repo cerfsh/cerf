@@ -14,6 +14,65 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+The low-priority correctness sweep: argument, path, and file handling now
+match the documented shell behavior, Windows console control is forwarded to
+the foreground job, and `net.http` no longer has a check-then-open race.
+
+### Changed
+
+- Windows foreground commands and `sys.exec` children start in their own
+  console process group, and a `SetConsoleCtrlHandler` forwards Ctrl-C to the
+  foreground job instead of letting the default handler terminate the shell
+  (#70).
+- `net.http` streams files from an already-open handle instead of using
+  `ServeDir`, so a path cannot be swapped between validation and use (#57).
+- `fs.df` reads `statvfs` on Unix so reserved filesystem blocks are not
+  reported as used (#59).
+
+### Fixed
+
+- The REPL incompleteness check only treats `#` as a comment at a word
+  boundary, so `if true { echo a#b }` executes instead of waiting for more
+  input (#72).
+- Malformed invocations (`cerf -c`, unknown options, stray operands,
+  `--version` with extras) report a usage error and exit 2, and operands after
+  the `-c` script become positional parameters (#71).
+- Windows job-object handles are closed when a job is dropped or a pipeline
+  fails to start, instead of leaking one handle per command (#51).
+- A leading unquoted `~` is expanded for ordinary arguments, assignment
+  values, and glob patterns, and quoted tildes stay literal (#69).
+- Unix `PATH` search skips non-executable files instead of letting them
+  shadow a real executable later in the list (#68).
+- `fs.du` reports allocated blocks rather than apparent size, counts a
+  hard-linked inode once, and reports walk errors (#60).
+- `net.fetch -o` writes through `/dev/null`, `/dev/stdout`, and symlinks
+  instead of replacing the node with a regular file (#58).
+- Huge `--timeout`, `--connect-timeout`, and `--idle-timeout` values are
+  rejected with a validation error instead of panicking on `Instant`
+  overflow (#56).
+- `help NAME` exits 0 when `man` or `<cmd> --help` displayed help, and 127
+  only when no help was found (#55).
+- Function calls push a local variable scope, `local` shadows globals for the
+  duration of the call, and `local` outside a function is an error (#54).
+- An unterminated `${` is a bad-substitution syntax error instead of
+  silently consuming the rest of the line (#53).
+- `break` and `continue` require a word boundary, so commands such as
+  `breakfast` and `continue.sh` parse as ordinary commands (#52).
+- `source` and `eval` return 2 for syntax errors while blank/comment-only
+  input remains a successful no-op (#50).
+- `stat` reports symbolic links (including dangling links) by default and
+  adds `-L` to dereference (#49).
+- `ls` lists dangling symlinks, shows `link -> target` for `-l`, and no
+  longer follows symlinked directories under `-R` (#48).
+- `pushd` and `popd` refresh `$PWD` in shell state and the process
+  environment (#47).
+- Alias values honor double quotes and remove the quote characters, and
+  keep literal backslashes inside them (#46).
+- `printf` reuses its format for every argument and supports `%b` escapes,
+  `%c`, floats, width, precision, and zero padding (#45).
+- `type` exits 1 when any operand cannot be resolved (#44).
+
+
 ## [0.3.2] - 2026-11-27
 
 The correctness follow-up: redirects, quoting, positional parameters, and job
