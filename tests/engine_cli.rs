@@ -1314,3 +1314,46 @@ fn du_reports_allocated_blocks_and_counts_hard_links_once() {
         .count();
     assert_eq!(file_lines, 1, "hard link counted twice: {stdout:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn stat_reports_symlinks_without_following_them() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let real = directory.path().join("real.txt");
+    let link = directory.path().join("slink");
+    let dangling = directory.path().join("dangling");
+    std::fs::write(&real, b"hi").expect("write real file");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    std::os::unix::fs::symlink("/cerf-definitely-missing", &dangling).expect("dangling symlink");
+
+    let output = cerf()
+        .args(["-c", &format!("stat '{}'", link.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("symbolic link"), "stdout: {stdout:?}");
+    assert!(stdout.contains("slink ->"), "stdout: {stdout:?}");
+
+    let output = cerf()
+        .args(["-c", &format!("stat '{}'", dangling.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "dangling link should be stat-able");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("symbolic link"),
+        "stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let output = cerf()
+        .args(["-c", &format!("stat -L '{}'", link.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("regular file"),
+        "stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

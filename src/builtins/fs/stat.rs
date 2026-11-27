@@ -8,32 +8,70 @@ use std::fs;
 pub const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "fs.stat",
     description: "Display file or file system status.",
-    usage: "fs.stat [file ...]\n\nDisplay file or file system status.",
+    usage: "fs.stat [-L] [file ...]\n\nDisplay file or file system status. Symbolic links are\nreported as links unless -L (dereference) is given.",
     run: runner,
 };
 
 pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
-    if args.is_empty() {
+    let mut dereference = false;
+    let mut files = Vec::new();
+    let mut parse_options = true;
+    for arg in args {
+        if parse_options && arg == "--" {
+            parse_options = false;
+        } else if parse_options && arg == "-L" {
+            dereference = true;
+        } else if parse_options && arg.starts_with('-') && arg.len() > 1 {
+            eprintln!("cerf: fs.stat: unknown option: {}", arg);
+            return (ExecutionResult::KeepRunning, 1);
+        } else {
+            files.push(arg);
+        }
+    }
+
+    if files.is_empty() {
         eprintln!("cerf: fs.stat: missing operand");
         return (ExecutionResult::KeepRunning, 1);
     }
 
     let mut exit_code = 0;
     let mut output = String::new();
-    for arg in args {
+    for arg in files {
         let path = expand_home(arg);
-        match fs::metadata(&path) {
+        let metadata = if dereference {
+            fs::metadata(&path)
+        } else {
+            fs::symlink_metadata(&path)
+        };
+        match metadata {
             Ok(meta) => {
-                let _ = writeln!(output, "  File: {}", arg);
-                let file_type = if meta.is_dir() {
+                let file_type = meta.file_type();
+                let kind = if file_type.is_symlink() {
+                    "symbolic link"
+                } else if meta.is_dir() {
                     "directory"
                 } else if meta.is_file() {
                     "regular file"
-                } else if meta.file_type().is_symlink() {
-                    "symbolic link"
                 } else {
                     "special file"
                 };
+
+                match (!dereference)
+                    .then(|| fs::read_link(&path).ok())
+                    .flatten()
+                {
+                    Some(target) => {
+                        let _ = writeln!(
+                            output,
+                            "  File: {} -> {}",
+                            arg,
+                            target.to_string_lossy()
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(output, "  File: {}", arg);
+                    }
+                }
 
                 let _ = writeln!(
                     output,
@@ -41,7 +79,7 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                     meta.len(),
                     meta.len().div_ceil(512), // Rough estimation of 512-byte blocks
                     4096,                     // IO block size (typical)
-                    file_type
+                    kind
                 );
 
                 #[cfg(windows)]
