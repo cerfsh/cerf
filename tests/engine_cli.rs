@@ -1270,3 +1270,47 @@ fn pushd_and_popd_refresh_pwd() {
         "popd did not restore PWD: {stdout:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn du_reports_allocated_blocks_and_counts_hard_links_once() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let sparse = directory.path().join("sparse.bin");
+    let sparse_file = std::fs::File::create(&sparse).expect("create sparse file");
+    sparse_file.set_len(1024 * 1024 * 1024).expect("size file");
+    drop(sparse_file);
+
+    let output = cerf()
+        .args(["-c", &format!("fs.du '{}'", sparse.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_size: u64 = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.split('\t').next())
+        .and_then(|size| size.parse().ok())
+        .expect("file size");
+    assert!(
+        first_size < 1024,
+        "sparse file should use allocated blocks, got {stdout:?}"
+    );
+
+    let first = directory.path().join("a");
+    let second = directory.path().join("b");
+    std::fs::write(&first, vec![b'x'; 4096]).expect("write first");
+    std::fs::hard_link(&first, &second).expect("hard link");
+
+    let output = cerf()
+        .args(["-c", &format!("fs.du '{}' '{}'", first.display(), second.display())])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let file_lines = stdout
+        .lines()
+        .filter(|line| !line.ends_with("\ttotal"))
+        .count();
+    assert_eq!(file_lines, 1, "hard link counted twice: {stdout:?}");
+}
