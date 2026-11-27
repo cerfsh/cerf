@@ -1163,3 +1163,27 @@ fn alias_values_understand_double_quotes() {
     assert!(output.status.success(), "status: {:?}", output.status);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "a b\n");
 }
+
+#[test]
+fn printf_reuses_the_format_and_expands_b() {
+    let output = cerf()
+        .args(["-c", "printf '[%s]\\n' a b c"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[a]\n[b]\n[c]\n");
+
+    let output = cerf()
+        .args(["-c", "printf '%b\\n' 'a\\tb'"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a\tb\n");
+
+    let output = cerf()
+        .args(["-c", "printf '%c %.2f %5s\\n' hello 1.5 ab"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "h 1.50    ab\n");
+}
