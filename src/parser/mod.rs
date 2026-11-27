@@ -91,6 +91,19 @@ pub fn is_incomplete(input: &str) -> bool {
                 }
                 at_word_start = true;
             }
+            '$' if chars.peek() == Some(&'{') => {
+                // Parameter expansion braces are not control-flow blocks.
+                // Consume through the closing brace (or newline) so an
+                // unterminated `${` reaches the parser as a bad substitution
+                // instead of looking like an open block.
+                chars.next();
+                for c in chars.by_ref() {
+                    if c == '}' || c == '\n' {
+                        break;
+                    }
+                }
+                at_word_start = false;
+            }
             '{' => {
                 depth += 1;
                 at_word_start = true;
@@ -835,6 +848,14 @@ mod tests {
         // A `#` at a word boundary still starts a comment.
         assert!(is_incomplete("if test.true { # start of block"));
         assert!(!is_incomplete("if test.true { io.echo hi # comment\n}"));
+    }
+
+    #[test]
+    fn test_incomplete_does_not_treat_parameter_braces_as_a_block() {
+        assert!(!is_incomplete("io.echo ${HOME"));
+        assert!(!is_incomplete("io.echo ${HOME}"));
+        assert!(!is_incomplete("if true { io.echo ${HOME} }"));
+        assert!(is_incomplete("if true { io.echo ${HOME"));
     }
 
     #[test]
