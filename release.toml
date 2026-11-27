@@ -48,7 +48,7 @@ enable = true
 enable = true
 features = ["sh", "ps1"]
 path = "~/.local/bin"
-path-win = "C:/bin/CodeTease"
+path-win = "$HOME/.local/bin"
 
 [docker]
 enable = true
