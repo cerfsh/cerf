@@ -686,7 +686,9 @@ fn execute_process(
                 }
                 #[cfg(windows)]
                 {
+                    crate::FG_JOB.store(pid as usize, std::sync::atomic::Ordering::Relaxed);
                     let code = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
+                    crate::FG_JOB.store(0, std::sync::atomic::Ordering::Relaxed);
                     if let Some(job) = state.jobs.get_mut(&job_id) {
                         for process in &mut job.processes {
                             process.state = crate::engine::state::JobState::Done(code);
