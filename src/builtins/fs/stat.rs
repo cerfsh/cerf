@@ -2,6 +2,7 @@ use crate::builtins::registry::CommandInfo;
 use crate::engine::path::expand_home;
 use crate::engine::state::{ExecutionResult, ShellState};
 use chrono::{DateTime, Local};
+use std::fmt::Write as _;
 use std::fs;
 
 pub const COMMAND_INFO: CommandInfo = CommandInfo {
@@ -18,11 +19,12 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
     }
 
     let mut exit_code = 0;
+    let mut output = String::new();
     for arg in args {
         let path = expand_home(arg);
         match fs::metadata(&path) {
             Ok(meta) => {
-                println!("  File: {}", arg);
+                let _ = writeln!(output, "  File: {}", arg);
                 let file_type = if meta.is_dir() {
                     "directory"
                 } else if meta.is_file() {
@@ -33,7 +35,8 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                     "special file"
                 };
 
-                println!(
+                let _ = writeln!(
+                    output,
                     "  Size: {:<15} Blocks: {:<10} IO Block: {:<10} {}",
                     meta.len(),
                     meta.len().div_ceil(512), // Rough estimation of 512-byte blocks
@@ -45,8 +48,12 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                 {
                     use std::os::windows::fs::MetadataExt;
                     let file_attributes = meta.file_attributes();
-                    println!("Device: unknown         Inode: unknown         Links: unknown");
-                    println!(
+                    let _ = writeln!(
+                        output,
+                        "Device: unknown         Inode: unknown         Links: unknown"
+                    );
+                    let _ = writeln!(
+                        output,
                         "Access: ({:o})  Uid: unknown   Gid: unknown",
                         file_attributes & 0o777
                     );
@@ -55,13 +62,15 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::MetadataExt;
-                    println!(
+                    let _ = writeln!(
+                        output,
                         "Device: {:<15x} Inode: {:<15} Links: {}",
                         meta.dev(),
                         meta.ino(),
                         meta.nlink()
                     );
-                    println!(
+                    let _ = writeln!(
+                        output,
                         "Access: ({:04o})  Uid: ({:5})   Gid: ({:5})",
                         meta.mode() & 0o7777,
                         meta.uid(),
@@ -71,21 +80,27 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
 
                 #[cfg(not(any(windows, unix)))]
                 {
-                    println!("Device: unknown         Inode: unknown         Links: unknown");
-                    println!("Access: unknown         Uid: unknown           Gid: unknown");
+                    let _ = writeln!(
+                        output,
+                        "Device: unknown         Inode: unknown         Links: unknown"
+                    );
+                    let _ = writeln!(
+                        output,
+                        "Access: unknown         Uid: unknown           Gid: unknown"
+                    );
                 }
 
                 if let Ok(atime) = meta.accessed() {
                     let dt: DateTime<Local> = atime.into();
-                    println!("Access: {}", dt.format("%Y-%m-%d %H:%M:%S.%f %z"));
+                    let _ = writeln!(output, "Access: {}", dt.format("%Y-%m-%d %H:%M:%S.%f %z"));
                 }
                 if let Ok(mtime) = meta.modified() {
                     let dt: DateTime<Local> = mtime.into();
-                    println!("Modify: {}", dt.format("%Y-%m-%d %H:%M:%S.%f %z"));
+                    let _ = writeln!(output, "Modify: {}", dt.format("%Y-%m-%d %H:%M:%S.%f %z"));
                 }
                 if let Ok(ctime) = meta.created() {
                     let dt: DateTime<Local> = ctime.into();
-                    println!("Birth:  {}", dt.format("%Y-%m-%d %H:%M:%S.%f %z"));
+                    let _ = writeln!(output, "Birth:  {}", dt.format("%Y-%m-%d %H:%M:%S.%f %z"));
                 }
             }
             Err(e) => {
@@ -93,6 +108,12 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                 exit_code = 1;
             }
         }
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = std::io::Write::write_all(&mut stdout, output.as_bytes()) {
+        eprintln!("cerf: fs.stat: write error: {}", error);
+        return (ExecutionResult::KeepRunning, 1);
     }
 
     (ExecutionResult::KeepRunning, exit_code)

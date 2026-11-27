@@ -1,6 +1,7 @@
 use super::utils::format_size;
 use crate::builtins::registry::CommandInfo;
 use crate::engine::state::{ExecutionResult, ShellState};
+use std::fmt::Write as _;
 use sysinfo::Disks;
 
 pub const COMMAND_INFO: CommandInfo = CommandInfo {
@@ -18,7 +19,10 @@ pub fn runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i3
             return (ExecutionResult::KeepRunning, 1);
         }
     };
-    println!(
+
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
         "{:<20} {:<10} {:<10} {:<10} {:<5} Mounted on",
         "Filesystem", "Size", "Used", "Avail", "Use%"
     );
@@ -33,7 +37,8 @@ pub fn runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i3
             0
         };
 
-        println!(
+        let _ = writeln!(
+            output,
             "{:<20} {:<10} {:<10} {:<10} {:>3}% {}",
             disk.name().to_string_lossy(),
             format_size(total),
@@ -42,6 +47,12 @@ pub fn runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i3
             use_pct,
             disk.mount_point().display()
         );
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = std::io::Write::write_all(&mut stdout, output.as_bytes()) {
+        eprintln!("cerf: fs.df: write error: {}", error);
+        return (ExecutionResult::KeepRunning, 1);
     }
 
     (ExecutionResult::KeepRunning, 0)

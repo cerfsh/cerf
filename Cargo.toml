@@ -29,7 +29,7 @@ url = "2.5.8"
 hickory-resolver = "0.25"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.32", features = ["signal", "process", "term"] }
+nix = { version = "0.32", features = ["fs", "signal", "process", "term"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = [

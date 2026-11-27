@@ -117,7 +117,11 @@ pub fn run(args: &[String], state: &mut ShellState) -> Result<(), String> {
             }
         } else if let Some(pos) = remaining.find(|c| ifs.contains(c)) {
             let word = &remaining[..pos];
-            remaining = &remaining[pos + 1..];
+            // `pos` is a byte offset at a char boundary; advance by the
+            // delimiter's UTF-8 width, not by one byte, or a multi-byte IFS
+            // character panics when slicing.
+            let delimiter_len = remaining[pos..].chars().next().map_or(1, char::len_utf8);
+            remaining = &remaining[pos + delimiter_len..];
             word
         } else {
             let word = remaining;

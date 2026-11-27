@@ -80,7 +80,13 @@ pub fn printf_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResu
     // In bash, if args remaining, format is reused.
     // We do a simple version: don't loop format.
 
-    print!("{}", out);
-    let _ = io::stdout().flush();
+    let mut stdout = io::stdout().lock();
+    if let Err(error) = stdout
+        .write_all(out.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        eprintln!("cerf: printf: write error: {}", error);
+        return (ExecutionResult::KeepRunning, 1);
+    }
     (ExecutionResult::KeepRunning, 0)
 }

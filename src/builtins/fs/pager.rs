@@ -41,7 +41,11 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
         for _ in 0..screen_height {
             match lines.next() {
                 Some(Ok(line)) => {
-                    println!("{}", line);
+                    let mut stdout = io::stdout().lock();
+                    if let Err(error) = writeln!(stdout, "{}", line) {
+                        eprintln!("cerf: fs.less: write error: {}", error);
+                        return (ExecutionResult::KeepRunning, 1);
+                    }
                 }
                 Some(Err(e)) => {
                     eprintln!("cerf: fs.less: error reading file: {}", e);
@@ -51,8 +55,13 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
             }
         }
 
-        print!("--More--");
-        let _ = io::stdout().flush();
+        {
+            let mut stdout = io::stdout().lock();
+            if let Err(error) = write!(stdout, "--More--").and_then(|()| stdout.flush()) {
+                eprintln!("cerf: fs.less: write error: {}", error);
+                return (ExecutionResult::KeepRunning, 1);
+            }
+        }
         let mut input = String::new();
         if io::stdin().read_line(&mut input).is_err() {
             break;

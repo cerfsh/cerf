@@ -2,6 +2,7 @@ use crate::builtins::registry::CommandInfo;
 use crate::engine::path::expand_home;
 use crate::engine::state::{ExecutionResult, ShellState};
 use jwalk::WalkDir;
+use std::fmt::Write as _;
 
 pub const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "fs.du",
@@ -18,6 +19,7 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
     };
 
     let mut exit_code = 0;
+    let mut output = String::new();
     for target in targets {
         let path = expand_home(&target);
         if !path.exists() {
@@ -37,10 +39,21 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                 let size = meta.len();
                 total_size += size;
                 // Streaming: print each file size
-                println!("{}\t{}", size.div_ceil(1024), entry.path().display());
+                let _ = writeln!(
+                    output,
+                    "{}\t{}",
+                    size.div_ceil(1024),
+                    entry.path().display()
+                );
             }
         }
-        println!("{}\ttotal", total_size.div_ceil(1024));
+        let _ = writeln!(output, "{}\ttotal", total_size.div_ceil(1024));
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = std::io::Write::write_all(&mut stdout, output.as_bytes()) {
+        eprintln!("cerf: fs.du: write error: {}", error);
+        return (ExecutionResult::KeepRunning, 1);
     }
 
     (ExecutionResult::KeepRunning, exit_code)

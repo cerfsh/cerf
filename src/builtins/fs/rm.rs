@@ -62,16 +62,19 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
             exit_code = 1;
             continue;
         }
-        if !path.exists() {
-            eprintln!(
-                "cerf: fs.rm: cannot remove '{}': No such file or directory",
-                arg
-            );
-            exit_code = 1;
-            continue;
-        }
+        // Inspect the link itself, not its target: `exists()` and `is_dir()`
+        // follow symlinks, which made dangling links look missing and sent
+        // links to directories into `remove_dir` (ENOTDIR).
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                eprintln!("cerf: fs.rm: cannot remove '{}': {}", arg, e);
+                exit_code = 1;
+                continue;
+            }
+        };
 
-        let res = if path.is_dir() {
+        let res = if metadata.file_type().is_dir() {
             if recursive {
                 fs::remove_dir_all(&path)
             } else {
