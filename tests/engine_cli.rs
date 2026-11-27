@@ -1187,3 +1187,30 @@ fn printf_reuses_the_format_and_expands_b() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "h 1.50    ab\n");
 }
+
+#[test]
+fn type_exits_nonzero_for_missing_names() {
+    let missing = cerf()
+        .args(["-c", "type cerf-definitely-missing-command"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("not found"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
+    let found = cerf()
+        .args(["-c", "type io.echo"])
+        .output()
+        .expect("run cerf");
+    assert!(found.status.success());
+
+    // One missing name makes the whole invocation fail, as in POSIX.
+    let mixed = cerf()
+        .args(["-c", "type io.echo cerf-definitely-missing-command"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(mixed.status.code(), Some(1));
+}

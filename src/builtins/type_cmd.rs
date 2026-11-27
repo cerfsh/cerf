@@ -10,8 +10,8 @@ pub const COMMAND_INFO: CommandInfo = CommandInfo {
 };
 
 pub fn type_runner(args: &[String], state: &mut ShellState) -> (ExecutionResult, i32) {
-    run(args, &state.aliases);
-    (ExecutionResult::KeepRunning, 0)
+    let code = run(args, &state.aliases);
+    (ExecutionResult::KeepRunning, code)
 }
 
 /// Return the type description for a single command name.
@@ -39,19 +39,22 @@ pub fn type_of(cmd: &str, aliases: &HashMap<String, String>) -> String {
     format!("cerf: type: {}: not found", cmd)
 }
 
-pub fn run(args: &[String], aliases: &HashMap<String, String>) {
+pub fn run(args: &[String], aliases: &HashMap<String, String>) -> i32 {
     if args.is_empty() {
-        return;
+        return 0;
     }
 
+    let mut exit_code = 0;
     for cmd in args {
         let desc = type_of(cmd, aliases);
         if desc.starts_with("cerf: type:") {
             eprintln!("{}", desc);
+            exit_code = 1;
         } else {
             println!("{}", desc);
         }
     }
+    exit_code
 }
 
 #[cfg(test)]
@@ -81,5 +84,19 @@ mod tests {
         let mut aliases = HashMap::new();
         aliases.insert("cd".to_string(), "dir.cd".to_string());
         assert_eq!(type_of("cd", &aliases), "cd is aliased to `dir.cd`");
+    }
+
+    #[test]
+    fn run_reports_missing_names() {
+        let aliases = HashMap::new();
+        assert_eq!(run(&[], &aliases), 0);
+        assert_eq!(run(&["io.echo".to_string()], &aliases), 0);
+        assert_eq!(
+            run(
+                &["cerf-definitely-missing-command".to_string()],
+                &aliases
+            ),
+            1
+        );
     }
 }
