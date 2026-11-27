@@ -37,29 +37,71 @@ pub fn expand_alias(cmd: &mut CommandNode, aliases: &HashMap<String, String>) ->
     false
 }
 
-/// Very small shell-word splitter that honours `'…'` quoting.
+/// Very small shell-word splitter that honours `'…'` and `"…"` quoting.
 /// Used only for parsing alias values.
 fn shell_split(s: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
-    let chars = s.chars().peekable();
+    let mut in_double = false;
+    let mut token_started = false;
+    let mut chars = s.chars().peekable();
 
-    for ch in chars {
+    while let Some(ch) = chars.next() {
         match ch {
-            '\'' if !in_single => in_single = true,
-            '\'' if in_single => in_single = false,
-            ' ' | '\t' if !in_single => {
-                if !current.is_empty() {
-                    tokens.push(current.clone());
-                    current.clear();
+            '\\' if !in_single => {
+                // Outside quotes a backslash escapes the next character. In
+                // double quotes it only does so for characters that are
+                // special there; other backslashes stay literal (so
+                // `printf "%s\n"` keeps its escape for printf).
+                match chars.peek() {
+                    Some(&next) if !in_double || matches!(next, '"' | '\\' | '$' | '`') => {
+                        chars.next();
+                        current.push(next);
+                    }
+                    _ => current.push('\\'),
+                }
+                token_started = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                token_started = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                token_started = true;
+            }
+            ' ' | '\t' if !in_single && !in_double => {
+                if token_started {
+                    tokens.push(std::mem::take(&mut current));
+                    token_started = false;
                 }
             }
-            other => current.push(other),
+            other => {
+                current.push(other);
+                token_started = true;
+            }
         }
     }
-    if !current.is_empty() {
+    if token_started {
         tokens.push(current);
     }
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_split;
+
+    #[test]
+    fn splits_single_double_and_unquoted_words() {
+        assert_eq!(shell_split("echo 'a b' \"c d\""), vec!["echo", "a b", "c d"]);
+        assert_eq!(
+            shell_split(r#"printf "%s\n" "x y""#),
+            vec!["printf", "%s\\n", "x y"]
+        );
+        assert_eq!(shell_split(r#"one\ two three"#), vec!["one two", "three"]);
+        assert_eq!(shell_split(r#"echo "" ''"#), vec!["echo", "", ""]);
+        assert_eq!(shell_split("   "), Vec::<String>::new());
+    }
 }

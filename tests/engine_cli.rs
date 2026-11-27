@@ -1153,3 +1153,13 @@ fn source_and_eval_report_syntax_errors() {
         .expect("run cerf");
     assert!(blank.status.success());
 }
+
+#[test]
+fn alias_values_understand_double_quotes() {
+    let output = cerf()
+        .args(["-c", "alias q='io.echo \"a b\"'; q"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a b\n");
+}
