@@ -11,6 +11,28 @@ pub const COMMAND_INFO: CommandInfo = CommandInfo {
     run: runner,
 };
 
+/// Return `(total, used, available)` in bytes.
+///
+/// GNU `df` computes Used from the total and *free* block counts, while Avail
+/// comes from the unprivileged available count. Using `available` for both
+/// counts reserved blocks as used.
+#[cfg(unix)]
+fn disk_space(disk: &sysinfo::Disk) -> Option<(u64, u64, u64)> {
+    let stats = nix::sys::statvfs::statvfs(disk.mount_point()).ok()?;
+    let fragment = stats.fragment_size() as u64;
+    let total = (stats.blocks() as u64).saturating_mul(fragment);
+    let free = (stats.blocks_free() as u64).saturating_mul(fragment);
+    let available = (stats.blocks_available() as u64).saturating_mul(fragment);
+    Some((total, total.saturating_sub(free), available))
+}
+
+#[cfg(not(unix))]
+fn disk_space(disk: &sysinfo::Disk) -> Option<(u64, u64, u64)> {
+    let total = disk.total_space();
+    let available = disk.available_space();
+    Some((total, total.saturating_sub(available), available))
+}
+
 pub fn runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
     let disks = match Disks::new_with_refreshed_list() {
         Ok(disks) => disks,
@@ -28,11 +50,15 @@ pub fn runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i3
     );
 
     for disk in &disks {
-        let total = disk.total_space();
-        let available = disk.available_space();
-        let used = total - available;
+        let (total, used, available) = disk_space(disk).unwrap_or_else(|| {
+            let total = disk.total_space();
+            let available = disk.available_space();
+            (total, total.saturating_sub(available), available)
+        });
         let use_pct = if total > 0 {
-            (used as f64 / total as f64 * 100.0) as u64
+            // GNU df rounds the capacity up, so a nearly-empty filesystem
+            // still shows 1% rather than 0%.
+            ((used as f64 / total as f64) * 100.0).ceil() as u64
         } else {
             0
         };
