@@ -145,7 +145,15 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
     let mut last_code = 0;
 
     if fg {
-        crate::FG_JOB.store(job_id, std::sync::atomic::Ordering::Relaxed);
+        // Store the foreground job's process-group leader so the console
+        // control handler can target it, not the shell's own group.
+        let group = state
+            .jobs
+            .get(&job_id)
+            .and_then(|job| job.processes.first())
+            .map(|process| process.pid as usize)
+            .unwrap_or(0);
+        crate::FG_JOB.store(group, std::sync::atomic::Ordering::Relaxed);
     }
 
     while let Some(job) = state.jobs.get_mut(&job_id) {

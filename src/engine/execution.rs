@@ -560,6 +560,14 @@ fn execute_process(
     #[cfg(unix)]
     let manage_job_control = !state.internal_builtin;
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Give the child its own console process group so the shell's
+        // SetConsoleCtrlHandler can forward Ctrl-C to just this job.
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    }
+
     #[cfg(unix)]
     let result = unsafe {
         command
@@ -1097,6 +1105,16 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                 })
                 .spawn()
         };
+
+        #[cfg(windows)]
+        if pipeline.background {
+            use std::os::windows::process::CommandExt;
+            // Background pipeline members get their own group so a Ctrl-C
+            // aimed at the shell's console group does not stop them.
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
 
         #[cfg(windows)]
         let result = command.spawn();

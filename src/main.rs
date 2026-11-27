@@ -10,6 +10,9 @@ use std::env;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicUsize;
 
+/// Foreground job tracked for the Windows console control handler. On Windows
+/// this is the process-group leader PID targeted by Ctrl-C forwarding; it is
+/// unused on Unix, where the foreground job owns the terminal directly.
 pub static FG_JOB: AtomicUsize = AtomicUsize::new(0);
 
 /// Parsed command-line invocation.

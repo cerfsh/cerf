@@ -40,8 +40,43 @@ pub fn restore_default() {
 }
 
 #[cfg(windows)]
+use std::sync::atomic::Ordering;
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+};
+
+/// Forward Ctrl-C/Ctrl-Break to the foreground job's process group instead of
+/// letting the default console handler terminate the shell itself.
+///
+/// Windows has no `SIGINT` to forward to an arbitrary group: a `CTRL_C_EVENT`
+/// cannot target another process group, so the interrupt is delivered as
+/// `CTRL_BREAK_EVENT`, which every console application treats as "terminate".
+#[cfg(windows)]
+unsafe extern "system" fn console_ctrl_handler(event: u32) -> i32 {
+    match event {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+            let group = crate::FG_JOB.load(Ordering::Relaxed);
+            if group != 0 {
+                unsafe {
+                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, group as u32);
+                }
+            }
+            // The shell itself must survive; rustyline handles Ctrl-C at the
+            // prompt and the foreground job received its own event.
+            1
+        }
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => 0,
+        _ => 0,
+    }
+}
+
+#[cfg(windows)]
 pub fn init() {
-    // Basic Windows console handling is handled by rustyline for Ctrl-C
+    unsafe {
+        SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
+    }
 }
 
 #[cfg(windows)]

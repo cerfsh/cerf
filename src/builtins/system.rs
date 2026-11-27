@@ -117,10 +117,21 @@ pub fn exec(args: &[String]) -> Result<i32, String> {
         };
 
         command.args(cmd_args);
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
 
         match command.spawn() {
             Ok(mut child) => {
+                crate::FG_JOB.store(
+                    child.id() as usize,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 let code = child.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
+                crate::FG_JOB.store(0, std::sync::atomic::Ordering::Relaxed);
                 Ok(code)
             }
             Err(e) => {
