@@ -1487,3 +1487,29 @@ fn tilde_expands_for_arguments_assignments_and_globs() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "~ ~\n");
 }
+
+#[test]
+fn huge_timeouts_are_rejected_without_panicking() {
+    let huge = "18446744073709551615";
+    for command in [
+        format!("net.wfp 127.0.0.1 80 --timeout {huge}"),
+        format!("net.socket 127.0.0.1 80 --connect-timeout {huge}"),
+        format!("net.socket --udp 127.0.0.1 80 --idle-timeout {huge}"),
+    ] {
+        let output = cerf()
+            .args(["-c", &command])
+            .output()
+            .expect("run cerf");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{command} exited with {:?}",
+            output.status
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("too large"),
+            "{command} stderr: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

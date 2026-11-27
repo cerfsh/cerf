@@ -19,7 +19,13 @@ pub fn parse_seconds(value: &str, option: &str) -> Result<Duration, String> {
     if seconds == 0 {
         return Err(format!("{} must be greater than zero", option));
     }
-    Ok(Duration::from_secs(seconds))
+    let duration = Duration::from_secs(seconds);
+    // Reject durations that cannot be represented as a deadline instead of
+    // panicking later when `Instant + duration` overflows.
+    if std::time::Instant::now().checked_add(duration).is_none() {
+        return Err(format!("{} is too large", option));
+    }
+    Ok(duration)
 }
 
 pub fn parse_milliseconds(value: &str, option: &str) -> Result<u64, String> {
@@ -56,7 +62,9 @@ pub async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
 }
 
 pub async fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "connection timeout is too large".to_string())?;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(format!("cannot resolve {}: resolution timed out", host));
@@ -93,6 +101,7 @@ mod tests {
         assert!(parse_port("65536", true).is_err());
         assert!(parse_port("http", true).is_err());
         assert!(parse_seconds("0", "--timeout").is_err());
+        assert!(parse_seconds("18446744073709551615", "--timeout").is_err());
         assert!(parse_milliseconds("0", "--interval-ms").is_err());
         assert_eq!(
             parse_seconds("5", "--timeout").ok(),

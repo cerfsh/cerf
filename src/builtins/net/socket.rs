@@ -157,7 +157,13 @@ async fn run_udp(options: &SocketOptions) -> Result<(), io::Error> {
                     }
                     None => {
                         stdin_open = false;
-                        idle_deadline = Some(tokio::time::Instant::now() + options.idle_timeout);
+                        idle_deadline = Some(
+                            tokio::time::Instant::now()
+                                .checked_add(options.idle_timeout)
+                                .ok_or_else(|| {
+                                    io::Error::other("--idle-timeout is too large")
+                                })?,
+                        );
                     }
                 }
             }
@@ -167,7 +173,11 @@ async fn run_udp(options: &SocketOptions) -> Result<(), io::Error> {
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
                 if !stdin_open {
-                    idle_deadline = Some(tokio::time::Instant::now() + options.idle_timeout);
+                    idle_deadline = Some(
+                        tokio::time::Instant::now()
+                            .checked_add(options.idle_timeout)
+                            .ok_or_else(|| io::Error::other("--idle-timeout is too large"))?,
+                    );
                 }
             }
             _ = idle, if !stdin_open => break,

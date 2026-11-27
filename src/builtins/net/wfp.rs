@@ -86,7 +86,9 @@ fn run_wfp(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
 }
 
 async fn wait_for_port(options: &WaitOptions) -> Result<(), String> {
-    let deadline = Instant::now() + options.timeout;
+    let deadline = Instant::now()
+        .checked_add(options.timeout)
+        .ok_or_else(|| "--timeout is too large".to_string())?;
     let mut last_error = format!("{}:{} is not reachable", options.host, options.port);
 
     loop {
