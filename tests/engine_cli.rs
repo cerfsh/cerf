@@ -1066,3 +1066,37 @@ fn sys_command_runs_external_commands_with_their_status() {
         .expect("run cerf");
     assert_eq!(output.status.code(), Some(7), "{output:?}");
 }
+
+#[test]
+fn script_mode_passes_extra_operands_as_positional_parameters() {
+    let output = cerf()
+        .args(["-c", "io.echo \"$1:$2:$#\"", "one", "two"])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "one:two:2\n");
+}
+
+#[test]
+fn malformed_invocations_report_usage_errors() {
+    let missing_script = cerf().arg("-c").output().expect("run cerf");
+    assert_eq!(missing_script.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&missing_script.stderr).contains("-c requires a script"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&missing_script.stderr)
+    );
+
+    let extra_version = cerf()
+        .args(["--version", "extra"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(extra_version.status.code(), Some(2));
+
+    let unknown = cerf().arg("--bogus").output().expect("run cerf");
+    assert_eq!(unknown.status.code(), Some(2));
+
+    let version = cerf().arg("--version").output().expect("run cerf");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with('v'));
+}

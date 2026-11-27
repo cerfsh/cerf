@@ -12,6 +12,54 @@ use std::sync::atomic::AtomicUsize;
 
 pub static FG_JOB: AtomicUsize = AtomicUsize::new(0);
 
+/// Parsed command-line invocation.
+enum Cli {
+    InternalBuiltin { name: String, args: Vec<String> },
+    Script {
+        script: String,
+        positional: Vec<String>,
+    },
+    Version,
+    Interactive,
+}
+
+fn parse_cli(args: &[String]) -> Result<Cli, String> {
+    let Some(first) = args.get(1) else {
+        return Ok(Cli::Interactive);
+    };
+
+    match first.as_str() {
+        "--internal-builtin" => {
+            let Some(name) = args.get(2) else {
+                return Err("--internal-builtin requires a builtin name".to_string());
+            };
+            Ok(Cli::InternalBuiltin {
+                name: name.clone(),
+                args: args[3..].to_vec(),
+            })
+        }
+        "-c" => {
+            let Some(script) = args.get(2) else {
+                return Err("-c requires a script".to_string());
+            };
+            // Everything after the script becomes the positional parameters
+            // ($1, $2, ...) for this invocation.
+            Ok(Cli::Script {
+                script: script.clone(),
+                positional: args[3..].to_vec(),
+            })
+        }
+        "--version" => {
+            if args.len() != 2 {
+                return Err("--version takes no arguments".to_string());
+            }
+            Ok(Cli::Version)
+        }
+        option if option.starts_with('-') => Err(format!("unknown option: {}", option)),
+        operand => Err(format!("unexpected argument: {}", operand)),
+    }
+}
+
 fn main() -> ExitCode {
     // Non-Unicode arguments are converted lossily instead of panicking, so
     // the shell still starts when a caller passes arbitrary bytes.
@@ -19,31 +67,37 @@ fn main() -> ExitCode {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
 
-    if args.get(1).is_some_and(|arg| arg == "--internal-builtin") {
-        let Some(name) = args.get(2) else {
-            eprintln!("cerf: --internal-builtin requires a builtin name");
+    let cli = match parse_cli(&args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("cerf: {}", error);
+            eprintln!("Usage: cerf [-c SCRIPT [args...]] [--version]");
             return ExitCode::from(2);
-        };
-        return ExitCode::from(run_internal_builtin(name, &args[3..]) as u8);
-    }
+        }
+    };
 
-    if args.len() >= 3 && args[1] == "-c" {
-        let input = &args[2];
-        // Without this, SIGTTOU keeps its default action and the child's
-        // `tcsetpgrp` stops it, hanging `-c` on a controlling terminal.
-        signals::init();
-        let mut state = ShellState::new();
-        let code = match parser::parse_pipeline(input, &state.variables) {
-            Some(entries) => engine::execute_list(entries, &mut state).1,
-            None if parser::is_blank_or_comment_only(input) => 0,
-            None => 2,
-        };
-        return ExitCode::from(code as u8);
-    }
-
-    if args.len() == 2 && args[1] == "--version" {
-        println!("v{}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+    match cli {
+        Cli::InternalBuiltin { name, args } => {
+            return ExitCode::from(run_internal_builtin(&name, &args) as u8);
+        }
+        Cli::Version => {
+            println!("v{}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Cli::Script { script, positional } => {
+            // Without this, SIGTTOU keeps its default action and the child's
+            // `tcsetpgrp` stops it, hanging `-c` on a controlling terminal.
+            signals::init();
+            let mut state = ShellState::new();
+            state.set_positional_parameters(&positional);
+            let code = match parser::parse_pipeline(&script, &state.variables) {
+                Some(entries) => engine::execute_list(entries, &mut state).1,
+                None if parser::is_blank_or_comment_only(&script) => 0,
+                None => 2,
+            };
+            return ExitCode::from(code as u8);
+        }
+        Cli::Interactive => {}
     }
 
     signals::init();
@@ -315,4 +369,37 @@ fn expand_prompt(prompt: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, String> {
+        let mut argv = vec!["cerf".to_string()];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        parse_cli(&argv)
+    }
+
+    #[test]
+    fn parses_script_invocations_and_positional_arguments() {
+        match parse(&["-c", "io.echo $1", "one", "two"]).expect("parse") {
+            Cli::Script { script, positional } => {
+                assert_eq!(script, "io.echo $1");
+                assert_eq!(positional, vec!["one".to_string(), "two".to_string()]);
+            }
+            _ => panic!("expected script invocation"),
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_invocations() {
+        assert!(parse(&["-c"]).is_err());
+        assert!(parse(&["--version", "extra"]).is_err());
+        assert!(parse(&["--bogus"]).is_err());
+        assert!(parse(&["script.cerf"]).is_err());
+        assert!(parse(&["--internal-builtin"]).is_err());
+        assert!(matches!(parse(&["--version"]), Ok(Cli::Version)));
+        assert!(matches!(parse(&[]), Ok(Cli::Interactive)));
+    }
 }
