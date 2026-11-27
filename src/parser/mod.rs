@@ -6,6 +6,7 @@ mod expand;
 // for all existing callers (engine.rs, main.rs, etc.).
 pub use ast::{
     Arg, CommandEntry, CommandNode, Connector, Pipeline, Redirect, RedirectKind, SimpleCommand,
+    WordPart,
 };
 pub use combinators::is_reserved_word;
 pub use expand::{expand_arg, expand_vars};
@@ -95,6 +96,70 @@ pub fn is_incomplete(input: &str) -> bool {
 
 /// True when every line is blank or a `#` comment. Used to distinguish
 /// comment-only input from a real parse failure.
+/// Remove unquoted comments from shell input, keeping newlines so a trailing
+/// comment does not join the next command line.
+///
+/// A `#` starts a comment only at the beginning of a word (start of input or
+/// after whitespace / a control operator), matching POSIX. A `#` inside a word
+/// (`foo#bar`) or inside quotes stays literal.
+fn strip_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    // True until a non-delimiter character is emitted; comments may only
+    // start at a word boundary.
+    let mut at_word_start = true;
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            at_word_start = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single => {
+                out.push(ch);
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                out.push(ch);
+                at_word_start = false;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                out.push(ch);
+                at_word_start = false;
+            }
+            '#' if !in_single && !in_double && at_word_start => {
+                // Drop the comment through the end of the line, but keep the
+                // newline itself so command separation is unchanged.
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+                at_word_start = true;
+            }
+            '\n' | ' ' | '\t' | '\r' | ';' | '&' | '|' | '(' | ')' | '{' | '}' => {
+                out.push(ch);
+                at_word_start = true;
+            }
+            _ => {
+                out.push(ch);
+                at_word_start = false;
+            }
+        }
+    }
+
+    out
+}
+
 pub fn is_blank_or_comment_only(input: &str) -> bool {
     input
         .lines()
@@ -131,7 +196,7 @@ pub fn parse_input(
     input: &str,
     _shell_vars: &std::collections::HashMap<String, crate::engine::state::Variable>,
 ) -> Option<Vec<CommandEntry>> {
-    let preprocessed = join_continuations(input);
+    let preprocessed = join_continuations(&strip_comments(input));
     let s = skip_leading_comments(&preprocessed).trim();
     if s.is_empty() {
         return None;
@@ -433,6 +498,24 @@ mod tests {
         assert_eq!(cmd.redirects().len(), 1);
         assert_eq!(cmd.redirects()[0].kind, RedirectKind::StdoutAppend);
         assert_eq!(cmd.redirects()[0].file, "out.txt");
+    }
+
+    #[test]
+    fn test_redirect_stderr_and_fd_duplication() {
+        let cmd = parse_line("echo hi 2>err.txt 2>&1").unwrap();
+        let redirects = cmd.redirects();
+        assert_eq!(redirects.len(), 2);
+        assert_eq!(redirects[0].fd, 2);
+        assert_eq!(redirects[0].kind, RedirectKind::StdoutOverwrite);
+        assert_eq!(redirects[0].file, "err.txt");
+        assert_eq!(redirects[1].fd, 2);
+        assert_eq!(redirects[1].kind, RedirectKind::FdDup);
+        assert_eq!(redirects[1].file, "1");
+
+        // A space between the number and `>` keeps the number as an argument.
+        let cmd = parse_line("echo 2 >out.txt").unwrap();
+        assert_eq!(arg_values(cmd.args()), vec!["2"]);
+        assert_eq!(cmd.redirects()[0].fd, 1);
     }
 
     #[test]

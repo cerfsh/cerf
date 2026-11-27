@@ -23,42 +23,8 @@ pub fn command_runner(args: &[String], state: &mut ShellState) -> (ExecutionResu
         return (cmd_info.run)(&args[1..], state);
     }
 
-    // external executable
-    let resolved = crate::engine::path::find_executable(name)
-        .unwrap_or_else(|| crate::engine::path::expand_home(name));
-
-    #[cfg(windows)]
-    let mut command = {
-        let is_batch = resolved.extension().is_some_and(|e| {
-            let e = e.to_string_lossy().to_lowercase();
-            e == "cmd" || e == "bat"
-        });
-        if is_batch {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/c").arg(&resolved);
-            c
-        } else {
-            std::process::Command::new(&resolved)
-        }
-    };
-
-    #[cfg(unix)]
-    let mut command = std::process::Command::new(&resolved);
-
-    // This bypasses proper process job control for Cerf but works as a simple implementation for now.
-    command.args(&args[1..]);
-
-    let code = match command.status() {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("cerf: command not found: {}", name);
-            } else {
-                eprintln!("cerf: command error: {}", e);
-            }
-            127
-        }
-    };
-
-    (ExecutionResult::KeepRunning, code)
+    // External executable: use the engine's normal spawn path so it gets
+    // default signal dispositions, its own process group, and terminal
+    // hand-off (Ctrl-C/Ctrl-Z work like an ordinary command).
+    crate::engine::execute_external(name, &args[1..], state)
 }

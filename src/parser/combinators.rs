@@ -1,7 +1,7 @@
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::is_not,
+    bytes::complete::{is_not, tag, take_while, take_while1},
     character::complete::{char, line_ending, multispace0, multispace1, space0, space1},
     multi::many1,
     sequence::{delimited, preceded},
@@ -14,26 +14,28 @@ use super::ast::{
 
 // ── Low-level nom parsers ──────────────────────────────────────────────────
 
-/// Append `ch` to `parts`, coalescing runs that share the same `expand` flag.
-fn push_part(parts: &mut Vec<WordPart>, ch: char, expand: bool) {
+/// Append `ch` to `parts`, coalescing runs that share the same flags.
+fn push_part(parts: &mut Vec<WordPart>, ch: char, expand: bool, glob: bool) {
     match parts.last_mut() {
-        Some(part) if part.expand == expand => part.text.push(ch),
+        Some(part) if part.expand == expand && part.glob == glob => part.text.push(ch),
         _ => parts.push(WordPart {
             text: ch.to_string(),
             expand,
+            glob,
         }),
     }
 }
 
-fn push_str_part(parts: &mut Vec<WordPart>, text: &str, expand: bool) {
+fn push_str_part(parts: &mut Vec<WordPart>, text: &str, expand: bool, glob: bool) {
     if text.is_empty() {
         return;
     }
     match parts.last_mut() {
-        Some(part) if part.expand == expand => part.text.push_str(text),
+        Some(part) if part.expand == expand && part.glob == glob => part.text.push_str(text),
         _ => parts.push(WordPart {
             text: text.to_string(),
             expand,
+            glob,
         }),
     }
 }
@@ -63,21 +65,22 @@ fn parse_double_quoted(input: &str) -> IResult<&str, Vec<WordPart>> {
             let mut chars = after.chars();
             match chars.next() {
                 Some(next @ ('$' | '"' | '\\')) => {
-                    push_part(&mut parts, next, false);
+                    push_part(&mut parts, next, false, false);
                     rest = &after[next.len_utf8()..];
                 }
                 Some('\n') => {
                     rest = &after[1..];
                 }
                 _ => {
-                    push_part(&mut parts, '\\', true);
+                    push_part(&mut parts, '\\', true, false);
                     rest = after;
                 }
             }
             continue;
         }
         let ch = rest.chars().next().expect("non-empty");
-        push_part(&mut parts, ch, true);
+        // Characters inside double quotes expand but are never glob syntax.
+        push_part(&mut parts, ch, true, false);
         rest = &rest[ch.len_utf8()..];
     }
 }
@@ -98,6 +101,7 @@ fn parse_single_quoted(input: &str) -> IResult<&str, Vec<WordPart>> {
         vec![WordPart {
             text: content.to_string(),
             expand: false,
+            glob: false,
         }]
     };
     Ok((&rest[end + 1..], parts))
@@ -125,20 +129,20 @@ fn parse_unquoted(input: &str) -> IResult<&str, Vec<WordPart>> {
                     rest = &rest[2..];
                 }
                 Some(next) => {
-                    push_part(&mut parts, next, false);
+                    push_part(&mut parts, next, false, false);
                     rest = &rest[1 + next.len_utf8()..];
                     consumed = true;
                 }
                 None => {
                     // Trailing backslash: keep it literally.
-                    push_part(&mut parts, '\\', false);
+                    push_part(&mut parts, '\\', false, false);
                     rest = &rest[1..];
                     consumed = true;
                 }
             }
             continue;
         }
-        push_part(&mut parts, ch, true);
+        push_part(&mut parts, ch, true, true);
         rest = &rest[ch.len_utf8()..];
         consumed = true;
     }
@@ -186,7 +190,7 @@ pub fn parse_arg(input: &str) -> IResult<&str, Arg> {
     // Greedily consume further adjacent segments (no whitespace between them).
     while let Ok((after, piece)) = parse_piece(rest) {
         for part in piece.0 {
-            push_str_part(&mut parts, &part.text, part.expand);
+            push_str_part(&mut parts, &part.text, part.expand, part.glob);
         }
         constructs += 1;
         rest = after;
@@ -206,20 +210,56 @@ pub fn parse_word(input: &str) -> IResult<&str, String> {
 
 // ── Redirect parsing ──────────────────────────────────────────────────────
 
-/// Parse a single redirect operator (`>>`, `>`, or `<`) followed by a filename.
+/// Parse a single redirect: an optional descriptor number, an operator
+/// (`>>`, `>`, or `<`), and either a filename or `&M` for descriptor
+/// duplication.
+///
+/// Examples: `> out`, `2> err`, `2>> err`, `3< in`, `2>&1`.
 fn parse_redirect(input: &str) -> IResult<&str, Redirect> {
     let (input, _) = multispace0(input)?;
+    let (input, fd_digits) = take_while(|c: char| c.is_ascii_digit()).parse(input)?;
     let (input, kind) = alt((
-        nom::combinator::map(nom::bytes::complete::tag(">>"), |_| {
-            RedirectKind::StdoutAppend
-        }),
+        nom::combinator::map(tag(">>"), |_| RedirectKind::StdoutAppend),
         nom::combinator::map(char('>'), |_| RedirectKind::StdoutOverwrite),
         nom::combinator::map(char('<'), |_| RedirectKind::StdinFrom),
     ))
     .parse(input)?;
+
+    let fd = if fd_digits.is_empty() {
+        if kind == RedirectKind::StdinFrom {
+            0
+        } else {
+            1
+        }
+    } else {
+        match fd_digits.parse::<i32>() {
+            Ok(fd) if fd >= 0 => fd,
+            _ => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    fd_digits,
+                    nom::error::ErrorKind::Digit,
+                )));
+            }
+        }
+    };
+
+    // `N>&M` / `N<&M`: duplicate descriptor M onto N. The direction is
+    // implied by which descriptor is being replaced.
+    if let Some(after_amp) = input.strip_prefix('&') {
+        let (after_amp, target) = take_while1(|c: char| c.is_ascii_digit()).parse(after_amp)?;
+        return Ok((
+            after_amp,
+            Redirect {
+                fd,
+                kind: RedirectKind::FdDup,
+                file: target.to_string(),
+            },
+        ));
+    }
+
     let (input, _) = multispace0(input)?;
     let (input, file) = parse_word(input)?;
-    Ok((input, Redirect { kind, file }))
+    Ok((input, Redirect { fd, kind, file }))
 }
 
 // ── Assignment parsing ────────────────────────────────────────────────────

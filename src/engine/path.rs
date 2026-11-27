@@ -1,37 +1,11 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-/// Normalize a path logically (resolving . and ..) without hitting the disk.
-/// This also ensures the use of native path separators.
-pub fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                match normalized.components().next_back() {
-                    Some(Component::Normal(_)) => {
-                        normalized.pop();
-                    }
-                    Some(Component::RootDir) | Some(Component::Prefix(_)) => {
-                        // At root, .. does nothing
-                    }
-                    _ => {
-                        normalized.push(Component::ParentDir);
-                    }
-                }
-            }
-            _ => normalized.push(component),
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        normalized.push(Component::CurDir);
-    }
-
-    normalized
-}
-
-/// Expand `~` to the home directory and normalize the resulting path.
+/// Expand a leading `~` to the home directory.
+///
+/// The rest of the path is deliberately left alone: collapsing `..` here
+/// would resolve it lexically, while the kernel resolves it after following
+/// symlinks (`link/../file` can name a different file than `file`). Redirect
+/// targets and command paths must let the OS do the resolution.
 pub fn expand_home(path_str: &str) -> PathBuf {
     if path_str == "~" {
         if let Some(home) = dirs::home_dir() {
@@ -40,9 +14,9 @@ pub fn expand_home(path_str: &str) -> PathBuf {
     } else if (path_str.starts_with("~/") || path_str.starts_with("~\\"))
         && let Some(home) = dirs::home_dir()
     {
-        return normalize_path(&home.join(&path_str[2..]));
+        return home.join(&path_str[2..]);
     }
-    normalize_path(Path::new(path_str))
+    Path::new(path_str).to_path_buf()
 }
 
 pub fn find_executable(cmd: &str) -> Option<PathBuf> {

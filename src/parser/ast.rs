@@ -5,10 +5,15 @@
 /// `expand` is false for text protected from variable expansion by single
 /// quotes or a backslash. Expansion happens at execution time, not parse
 /// time, so variable contents are always treated as data.
+///
+/// `glob` is false when glob metacharacters in this run were quoted or
+/// backslash-escaped. Quoting is tracked per run so `"file[1]".txt` stays a
+/// literal filename instead of matching `file1.txt`.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct WordPart {
     pub text: String,
     pub expand: bool,
+    pub glob: bool,
 }
 
 /// A single shell argument with quoting metadata.
@@ -133,16 +138,21 @@ impl CommandNode {
 /// I/O redirection attached to a single command.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RedirectKind {
-    /// `>  file` — truncate-write stdout to file
+    /// `> file` / `N> file` — truncate-write output to file
     StdoutOverwrite,
-    /// `>> file` — append stdout to file
+    /// `>> file` / `N>> file` — append output to file
     StdoutAppend,
-    /// `<  file` — read stdin from file
+    /// `< file` / `N< file` — read input from file
     StdinFrom,
+    /// `N>&M` / `N<&M` — duplicate descriptor `M` onto `N`
+    /// (`file` holds `M` as text)
+    FdDup,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Redirect {
+    /// Descriptor being redirected (1 for a bare `>`, 0 for a bare `<`).
+    pub fd: i32,
     pub kind: RedirectKind,
     pub file: String,
 }

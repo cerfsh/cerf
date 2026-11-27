@@ -5,13 +5,22 @@ use std::path::PathBuf;
 pub const COMMAND_INFO_EXIT: CommandInfo = CommandInfo {
     name: "sys.exit",
     description: "Exit the shell.",
-    usage: "sys.exit\n\nExit the shell.",
+    usage: "sys.exit [n]\n\nExit the shell with status N, or with the status of the last command.",
     run: exit_runner,
 };
 
-pub fn exit_runner(_args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
-    exit();
-    (ExecutionResult::Exit, 0)
+pub fn exit_runner(args: &[String], state: &mut ShellState) -> (ExecutionResult, i32) {
+    let code = match args.first() {
+        None => state.last_status,
+        Some(arg) => match arg.parse::<i64>() {
+            Ok(code) => (code & 0xff) as i32,
+            Err(_) => {
+                eprintln!("cerf: exit: {}: numeric argument required", arg);
+                2
+            }
+        },
+    };
+    (ExecutionResult::Exit, code)
 }
 
 pub const COMMAND_INFO_CLEAR: CommandInfo = CommandInfo {
@@ -34,6 +43,11 @@ pub const COMMAND_INFO_EXEC: CommandInfo = CommandInfo {
 };
 
 pub fn exec_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32) {
+    // POSIX: `exec` with no operands is a no-op, not a request to exit.
+    if args.is_empty() {
+        return (ExecutionResult::KeepRunning, 0);
+    }
+
     match exec(args) {
         Ok(code) => (ExecutionResult::Exit, code),
         Err(e) => {
@@ -45,10 +59,6 @@ pub fn exec_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult
 use std::process::Command;
 
 use crate::engine::path::{expand_home, find_executable};
-
-pub fn exit() {
-    // No-op here, handled by engine return value
-}
 
 pub fn clear() {
     use std::io::Write;
@@ -80,9 +90,13 @@ pub fn exec(args: &[String]) -> Result<i32, String> {
     {
         use std::os::unix::process::CommandExt;
 
-        // Restore default signal handling before exec-ing.
+        // Ignored dispositions survive `exec`, so an interactive shell would
+        // otherwise hand SIGINT/SIGQUIT/SIGTSTP/etc. over as ignored.
+        crate::signals::restore_default();
         let err = Command::new(&resolved).args(cmd_args).exec(); // never returns on success
 
+        // `exec` failed: restore the shell's own handlers before continuing.
+        crate::signals::init();
         Err(format!("cerf: exec: {}: {}", cmd_name, err))
     }
 

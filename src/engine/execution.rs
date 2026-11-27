@@ -10,17 +10,51 @@ use crate::signals;
 use super::alias::expand_alias;
 use super::glob::expand_globs;
 use super::path::{expand_home, find_executable};
-use super::redirect::{open_stdin_redirect, open_stdout_redirect, resolve_redirects};
+use super::redirect::{RedirectSource, prepare_redirects, touch_redirect_files};
 use super::state::{ExecutionResult, ShellState, Variable};
 
 /// Expand every argument once against the current variables. The result is
-/// plain data: no parsing, no recursive expansion.
+/// plain data: no parsing, no recursive expansion. Quoting metadata (and
+/// therefore the per-run glob protection) is preserved.
 fn expand_args(args: &[Arg], state: &ShellState) -> Vec<Arg> {
     args.iter()
-        .map(|arg| Arg {
-            value: expand_arg(arg, &state.variables),
-            quoted: arg.quoted,
-            parts: Vec::new(),
+        .map(|arg| {
+            if arg.parts.is_empty() {
+                return Arg {
+                    value: arg.value.clone(),
+                    quoted: arg.quoted,
+                    parts: Vec::new(),
+                };
+            }
+
+            let mut parts: Vec<crate::parser::WordPart> = Vec::new();
+            for part in &arg.parts {
+                let text = if part.expand {
+                    expand_vars(&part.text, &state.variables)
+                } else {
+                    part.text.clone()
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                match parts.last_mut() {
+                    Some(last) if last.expand == part.expand && last.glob == part.glob => {
+                        last.text.push_str(&text);
+                    }
+                    _ => parts.push(crate::parser::WordPart {
+                        text,
+                        expand: part.expand,
+                        glob: part.glob,
+                    }),
+                }
+            }
+
+            let value = parts.iter().map(|part| part.text.as_str()).collect();
+            Arg {
+                value,
+                quoted: arg.quoted,
+                parts,
+            }
         })
         .collect()
 }
@@ -34,6 +68,66 @@ fn expanded_assignments(
         .iter()
         .map(|(key, value)| (key.clone(), expand_arg(value, &state.variables)))
         .collect()
+}
+
+/// State saved while prefix assignments (`VAR=value cmd`) are active.
+struct SavedAssignment {
+    name: String,
+    variable: Option<Variable>,
+    env: Option<std::ffi::OsString>,
+}
+
+/// Apply `VAR=value` assignments for the duration of an in-process command.
+///
+/// They become visible to the shell's variable lookup (so `IFS=: read x`
+/// splits on `:`) and to the process environment (so child processes see
+/// them), then are restored by [`restore_scoped_assignments`].
+fn apply_scoped_assignments(
+    state: &mut ShellState,
+    assignments: &[(String, String)],
+) -> Result<Vec<SavedAssignment>, String> {
+    let mut saved = Vec::with_capacity(assignments.len());
+    for (name, value) in assignments {
+        if !crate::engine::state::is_valid_name(name) {
+            restore_scoped_assignments(state, saved);
+            return Err(format!("cerf: '{}': not a valid identifier", name));
+        }
+        if state.get_var(name).is_some_and(|var| var.readonly) {
+            restore_scoped_assignments(state, saved);
+            return Err(format!("cerf: {}: readonly variable", name));
+        }
+
+        saved.push(SavedAssignment {
+            name: name.clone(),
+            variable: state.get_var(name).cloned(),
+            env: std::env::var_os(name),
+        });
+        state.set_var(name, Variable::new_string(value.clone()));
+        unsafe {
+            std::env::set_var(name, value);
+        }
+    }
+    Ok(saved)
+}
+
+fn restore_scoped_assignments(state: &mut ShellState, saved: Vec<SavedAssignment>) {
+    for saved in saved.into_iter().rev() {
+        match saved.variable {
+            Some(variable) => state.set_var(&saved.name, variable),
+            None => {
+                state.variables.remove(&saved.name);
+                for scope in &mut state.scopes {
+                    scope.remove(&saved.name);
+                }
+            }
+        }
+        unsafe {
+            match saved.env {
+                Some(value) => std::env::set_var(&saved.name, value),
+                None => std::env::remove_var(&saved.name),
+            }
+        }
+    }
 }
 
 fn internal_command(name: &str, args: &[String]) -> Command {
@@ -63,26 +157,160 @@ pub(crate) fn execute_isolated(
     execute_process(command, name, &pipeline, state, None)
 }
 
+/// Run an external command through the normal spawn path so it receives
+/// signal defaults, its own process group, and terminal hand-off.
+///
+/// Used by `sys.command`, which previously called `Command::status()`
+/// directly and therefore left SIGINT/SIGQUIT/SIGTSTP ignored in the child.
+pub(crate) fn execute_external(
+    name: &str,
+    args: &[String],
+    state: &mut ShellState,
+) -> (ExecutionResult, i32) {
+    let resolved = find_executable(name).unwrap_or_else(|| expand_home(name));
+
+    #[cfg(windows)]
+    let mut command = {
+        let is_batch = resolved.extension().is_some_and(|e| {
+            let e = e.to_string_lossy().to_lowercase();
+            e == "cmd" || e == "bat"
+        });
+        if is_batch {
+            let mut command = Command::new("cmd");
+            command.arg("/c").arg(&resolved);
+            command
+        } else {
+            Command::new(&resolved)
+        }
+    };
+
+    #[cfg(unix)]
+    let mut command = Command::new(&resolved);
+
+    command.args(args);
+
+    let cmd = crate::parser::SimpleCommand {
+        assignments: Vec::new(),
+        name: Some(name.to_string()),
+        args: args.iter().cloned().map(Arg::plain).collect(),
+        redirects: Vec::new(),
+    };
+    let pipeline = Pipeline {
+        commands: vec![crate::parser::CommandNode::Simple(cmd)],
+        negated: false,
+        background: false,
+    };
+    execute_process(command, name, &pipeline, state, None)
+}
+
+/// Apply redirects to a child process.
+///
+/// On Unix the descriptors are installed in the child through `pre_exec`, in
+/// source order, so `2>`, arbitrary descriptor numbers, and `2>&1` all work.
+#[cfg(unix)]
+fn apply_redirects_to_command(
+    command: &mut Command,
+    redirects: &[crate::parser::Redirect],
+    state: &ShellState,
+) -> Result<(), String> {
+    use std::os::fd::AsRawFd as _;
+
+    if redirects.is_empty() {
+        return Ok(());
+    }
+    let prepared = prepare_redirects(redirects, &state.variables)?;
+    unsafe {
+        command.pre_exec(move || {
+            for redirect in &prepared {
+                let source = match &redirect.source {
+                    RedirectSource::File(file) => file.as_raw_fd(),
+                    RedirectSource::Dup(target) => *target,
+                };
+                if nix::libc::dup2(source, redirect.fd) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_redirects_to_command(
+    command: &mut Command,
+    redirects: &[crate::parser::Redirect],
+    state: &ShellState,
+) -> Result<(), String> {
+    use std::fs::File;
+
+    #[derive(Clone)]
+    enum WinSource {
+        File(File),
+        Inherit,
+    }
+    impl WinSource {
+        fn try_clone(&self) -> std::io::Result<Self> {
+            match self {
+                Self::File(file) => Ok(Self::File(file.try_clone()?)),
+                Self::Inherit => Ok(Self::Inherit),
+            }
+        }
+    }
+
+    // Std support only exposes 0/1/2; resolve duplications against the
+    // final source for those descriptors.
+    let mut slots: [Option<WinSource>; 3] = [None, None, None];
+    for redirect in prepare_redirects(redirects, &state.variables)? {
+        let Ok(fd) = usize::try_from(redirect.fd) else {
+            continue;
+        };
+        if fd >= slots.len() {
+            continue;
+        }
+        match redirect.source {
+            RedirectSource::File(file) => slots[fd] = Some(WinSource::File(file)),
+            RedirectSource::Dup(target) => {
+                let source = usize::try_from(target).ok().and_then(|target| {
+                    if target < slots.len() {
+                        slots[target].clone()
+                    } else {
+                        Some(WinSource::Inherit)
+                    }
+                });
+                slots[fd] = source.or(Some(WinSource::Inherit));
+            }
+        }
+    }
+
+    for (fd, slot) in slots.into_iter().enumerate() {
+        let Some(source) = slot else {
+            continue;
+        };
+        let stdio = match source {
+            WinSource::File(file) => Stdio::from(file),
+            WinSource::Inherit => Stdio::inherit(),
+        };
+        match fd {
+            0 => command.stdin(stdio),
+            1 => command.stdout(stdio),
+            _ => command.stderr(stdio),
+        };
+    }
+
+    Ok(())
+}
+
 fn apply_command_io(
     command: &mut Command,
-    cmd: &crate::parser::SimpleCommand,
+    redirects: &[crate::parser::Redirect],
     pipeline: &Pipeline,
     state: &ShellState,
 ) -> Result<(), String> {
-    let (stdin_redir, stdout_redir) = resolve_redirects(&cmd.redirects);
+    apply_redirects_to_command(command, redirects, state)?;
 
-    if let Some(redir) = stdin_redir {
-        let mut expanded_redir = redir.clone();
-        expanded_redir.file = expand_vars(&redir.file, &state.variables);
-        command.stdin(Stdio::from(open_stdin_redirect(&expanded_redir)?));
-    } else if pipeline.background {
+    if pipeline.background {
         command.stdin(Stdio::null());
-    }
-
-    if let Some(redir) = stdout_redir {
-        let mut expanded_redir = redir.clone();
-        expanded_redir.file = expand_vars(&redir.file, &state.variables);
-        command.stdout(Stdio::from(open_stdout_redirect(&expanded_redir)?));
     }
 
     Ok(())
@@ -95,8 +323,10 @@ fn simple_is_in_process_builtin(cmd: &crate::parser::SimpleCommand, state: &Shel
         return false;
     };
     let name = expand_vars(raw_name, &state.variables);
+    // Functions run in this process (so state changes survive) and therefore
+    // need their redirects applied by swapping descriptors here.
     if state.functions.contains_key(&name) {
-        return false;
+        return true;
     }
     if crate::builtins::registry::is_process_isolated(&name) {
         return false;
@@ -120,43 +350,44 @@ impl StdioRedirect {
         use std::io::Write as _;
         use std::os::fd::IntoRawFd as _;
 
-        let (stdin_redir, stdout_redir) = resolve_redirects(redirects);
-        let mut files: Vec<(std::fs::File, i32)> = Vec::new();
-        if let Some(redir) = stdin_redir {
-            let mut expanded = redir.clone();
-            expanded.file = expand_vars(&redir.file, &state.variables);
-            files.push((open_stdin_redirect(&expanded)?, nix::libc::STDIN_FILENO));
-        }
-        if let Some(redir) = stdout_redir {
-            let mut expanded = redir.clone();
-            expanded.file = expand_vars(&redir.file, &state.variables);
-            files.push((open_stdout_redirect(&expanded)?, nix::libc::STDOUT_FILENO));
-        }
+        let prepared = prepare_redirects(redirects, &state.variables)?;
 
         let _ = std::io::stdout().flush();
         let mut guard = StdioRedirect { saved: Vec::new() };
-        for (file, target) in files {
-            let raw = file.into_raw_fd();
-            // SAFETY: `raw` and `target` are valid descriptors; failures are
-            // reported and every successful swap is restored by `Drop`.
-            let saved = unsafe { nix::libc::dup(target) };
-            if saved < 0 {
-                unsafe { nix::libc::close(raw) };
+        for redirect in prepared {
+            let target = redirect.fd;
+            // Save the original descriptor only once, even when it is
+            // redirected repeatedly (`>a >b`, `2>&1`).
+            if !guard
+                .saved
+                .iter()
+                .any(|&(_, saved_target)| saved_target == target)
+            {
+                let saved = unsafe { nix::libc::dup(target) };
+                if saved < 0 {
+                    return Err(format!(
+                        "cerf: redirect: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                guard.saved.push((saved, target));
+            }
+
+            let result = match redirect.source {
+                RedirectSource::File(file) => {
+                    let raw = file.into_raw_fd();
+                    let result = unsafe { nix::libc::dup2(raw, target) };
+                    unsafe { nix::libc::close(raw) };
+                    result
+                }
+                RedirectSource::Dup(source) => unsafe { nix::libc::dup2(source, target) },
+            };
+            if result < 0 {
                 return Err(format!(
                     "cerf: redirect: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            if unsafe { nix::libc::dup2(raw, target) } < 0 {
-                let error = std::io::Error::last_os_error();
-                unsafe {
-                    nix::libc::close(saved);
-                    nix::libc::close(raw);
-                }
-                return Err(format!("cerf: redirect: {}", error));
-            }
-            unsafe { nix::libc::close(raw) };
-            guard.saved.push((saved, target));
         }
         Ok(guard)
     }
@@ -192,53 +423,83 @@ impl StdioRedirect {
     fn apply(redirects: &[crate::parser::Redirect], state: &ShellState) -> Result<Self, String> {
         use std::io::Write as _;
         use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::System::Console::{
-            GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
         };
 
-        let (stdin_redir, stdout_redir) = resolve_redirects(redirects);
-        let mut files = Vec::new();
-        let mut targets = Vec::new();
-        if let Some(redir) = stdin_redir {
-            let mut expanded = redir.clone();
-            expanded.file = expand_vars(&redir.file, &state.variables);
-            files.push(open_stdin_redirect(&expanded)?);
-            targets.push(STD_INPUT_HANDLE);
-        }
-        if let Some(redir) = stdout_redir {
-            let mut expanded = redir.clone();
-            expanded.file = expand_vars(&redir.file, &state.variables);
-            files.push(open_stdout_redirect(&expanded)?);
-            targets.push(STD_OUTPUT_HANDLE);
+        fn std_handle(fd: i32) -> windows_sys::Win32::System::Console::STD_HANDLE {
+            match fd {
+                0 => STD_INPUT_HANDLE,
+                1 => STD_OUTPUT_HANDLE,
+                _ => STD_ERROR_HANDLE,
+            }
         }
 
+        let prepared = prepare_redirects(redirects, &state.variables)?;
         let _ = std::io::stdout().flush();
         let mut guard = StdioRedirect {
             saved: Vec::new(),
-            files,
+            files: Vec::new(),
         };
-        for (file, target) in guard.files.iter().zip(targets) {
-            use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
 
-            let handle = file.as_raw_handle() as _;
-            // Mark the file inheritable so children spawned while the redirect
-            // is active inherit it, the way Unix passes fd 0/1 down.
-            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
-                == 0
+        // Track the current handle for 0/1/2 so `2>&1` duplicates the handle
+        // stdout was last pointed at.
+        let mut current: [Option<HANDLE>; 3] = [
+            Some(unsafe { GetStdHandle(STD_INPUT_HANDLE) }),
+            Some(unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }),
+            Some(unsafe { GetStdHandle(STD_ERROR_HANDLE) }),
+        ];
+
+        for redirect in prepared {
+            let Ok(fd) = usize::try_from(redirect.fd) else {
+                continue;
+            };
+            if fd >= current.len() {
+                continue;
+            }
+            let handle = match redirect.source {
+                RedirectSource::File(file) => {
+                    use windows_sys::Win32::Foundation::{
+                        HANDLE_FLAG_INHERIT, SetHandleInformation,
+                    };
+                    let handle = file.as_raw_handle() as HANDLE;
+                    // Mark the file inheritable so children spawned while the
+                    // redirect is active inherit it, like fd 0/1 on Unix.
+                    if unsafe {
+                        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+                    } == 0
+                    {
+                        return Err(format!(
+                            "cerf: redirect: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    guard.files.push(file);
+                    handle
+                }
+                RedirectSource::Dup(source) => usize::try_from(source)
+                    .ok()
+                    .filter(|source| *source < current.len())
+                    .and_then(|source| current[source])
+                    .unwrap_or(std::ptr::null_mut()),
+            };
+
+            if !guard
+                .saved
+                .iter()
+                .any(|&(saved, _)| saved == std_handle(fd as i32))
             {
+                let saved = unsafe { GetStdHandle(std_handle(fd as i32)) };
+                guard.saved.push((std_handle(fd as i32), saved));
+            }
+            if unsafe { SetStdHandle(std_handle(fd as i32), handle) } == 0 {
                 return Err(format!(
                     "cerf: redirect: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            let saved = unsafe { GetStdHandle(target) };
-            if unsafe { SetStdHandle(target, handle) } == 0 {
-                return Err(format!(
-                    "cerf: redirect: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            guard.saved.push((target, saved));
+            current[fd] = Some(handle);
         }
         Ok(guard)
     }
@@ -254,6 +515,23 @@ impl Drop for StdioRedirect {
             unsafe { windows_sys::Win32::System::Console::SetStdHandle(target, saved) };
         }
     }
+}
+
+/// Build a self-contained script that declares a function and calls it with
+/// the given (already expanded) arguments. Used to run a function as a
+/// pipeline element or subshell.
+fn function_call_script(name: &str, body: &[CommandEntry], args: &[String]) -> String {
+    let decl =
+        crate::engine::job_control::format_node_full(&crate::parser::CommandNode::FuncDecl {
+            name: name.to_string(),
+            body: body.to_vec(),
+        });
+    let mut call = crate::engine::job_control::quote_word(name);
+    for arg in args {
+        call.push(' ');
+        call.push_str(&crate::engine::job_control::quote_word(arg));
+    }
+    format!("{}; {}", decl, call)
 }
 
 fn execute_process(
@@ -424,36 +702,30 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         crate::parser::CommandNode::Simple(s) => s,
         _ => return (ExecutionResult::KeepRunning, 0), // handled in execute()
     };
-    let (stdin_redir, stdout_redir) = resolve_redirects(&cmd.redirects);
-
     if cmd.name.is_none() {
         // Just assignments
         for (key, val) in &cmd.assignments {
             let expanded_val = expand_arg(val, &state.variables);
+            if state.get_var(key).is_some_and(|var| var.readonly) {
+                eprintln!("cerf: {}: readonly variable", key);
+                return (ExecutionResult::KeepRunning, 1);
+            }
+            // Exported variables stay in sync with the process environment;
+            // merely being present there is not enough (unexported variables
+            // inherited by the shell must not be overwritten).
+            let exported = state.get_var(key).is_some_and(|var| var.exported);
             state.set_var(key, Variable::new_string(expanded_val.clone()));
-            // If already in env, update it there too
-            if std::env::var(key).is_ok() {
+            if exported {
                 unsafe {
                     std::env::set_var(key, &expanded_val);
                 }
             }
         }
-        // Handle residuals like redirects (e.g., VAR=val > file)
-        if let Some(redir) = stdin_redir {
-            let mut expanded_redir = redir.clone();
-            expanded_redir.file = expand_vars(&redir.file, &state.variables);
-            if let Err(e) = open_stdin_redirect(&expanded_redir) {
-                eprintln!("{}", e);
-                return (ExecutionResult::KeepRunning, 1);
-            }
-        }
-        if let Some(redir) = stdout_redir {
-            let mut expanded_redir = redir.clone();
-            expanded_redir.file = expand_vars(&redir.file, &state.variables);
-            if let Err(e) = open_stdout_redirect(&expanded_redir) {
-                eprintln!("{}", e);
-                return (ExecutionResult::KeepRunning, 1);
-            }
+        // Handle residuals like redirects (e.g., VAR=val > file): a shell
+        // still creates/truncates the target even with no command.
+        if let Err(e) = touch_redirect_files(&cmd.redirects, &state.variables) {
+            eprintln!("{}", e);
+            return (ExecutionResult::KeepRunning, 1);
         }
         return (ExecutionResult::KeepRunning, 0);
     }
@@ -502,17 +774,26 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
             } else {
                 None
             };
-            if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
+            if let Err(error) = apply_command_io(&mut command, &cmd.redirects, pipeline, state) {
                 eprintln!("{}", error);
                 return (ExecutionResult::KeepRunning, 1);
             }
             return execute_process(command, launch_name, pipeline, state, snapshot);
         }
 
-        let run_generic =
-            |state: &mut ShellState| -> (ExecutionResult, i32) { (cmd_info.run)(&args, state) };
-
-        run_generic(state)
+        // In-process builtins run with their prefix assignments applied to
+        // both shell state and the environment, then everything is restored.
+        let assignments = expanded_assignments(&cmd.assignments, state);
+        let saved = match apply_scoped_assignments(state, &assignments) {
+            Ok(saved) => saved,
+            Err(error) => {
+                eprintln!("{}", error);
+                return (ExecutionResult::KeepRunning, 1);
+            }
+        };
+        let result = (cmd_info.run)(&args, state);
+        restore_scoped_assignments(state, saved);
+        result
     } else {
         let resolved = find_executable(&name).unwrap_or_else(|| expand_home(&name));
 
@@ -538,7 +819,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         let assignments = expanded_assignments(&cmd.assignments, state);
         command.envs(assignments.iter().map(|(key, value)| (key, value)));
 
-        if let Err(error) = apply_command_io(&mut command, cmd, pipeline, state) {
+        if let Err(error) = apply_command_io(&mut command, &cmd.redirects, pipeline, state) {
             eprintln!("{}", error);
             return (ExecutionResult::KeepRunning, 1);
         }
@@ -566,6 +847,24 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
     if cmds.len() == 1 {
         let node = &cmds[0];
         let redirects = node.redirects();
+
+        // `if … { … } &`, `for … &`, and `func f …; f &` must not run in the
+        // foreground: a subshell performs the work and the job is registered
+        // immediately.
+        if pipeline.background {
+            if !matches!(node, crate::parser::CommandNode::Simple(_)) {
+                return execute_block_with_redirects(&pipeline, node, redirects, state);
+            }
+            if let crate::parser::CommandNode::Simple(cmd) = node {
+                let name = expand_vars(cmd.name.as_deref().unwrap_or(""), &state.variables);
+                if let Some(body) = state.functions.get(&name).cloned() {
+                    let args = expand_globs(&expand_args(&cmd.args, state));
+                    let script = function_call_script(&name, &body, &args);
+                    return execute_script_with_redirects(&pipeline, &script, redirects, state);
+                }
+            }
+        }
+
         let in_process = match node {
             crate::parser::CommandNode::Simple(cmd) => {
                 !pipeline.background && simple_is_in_process_builtin(cmd, state)
@@ -629,47 +928,76 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
     };
 
     for (i, cmd) in cmds.iter().enumerate() {
-        let name = match cmd {
-            crate::parser::CommandNode::Simple(s) => s.name.as_deref().unwrap_or(""),
+        let is_block = matches!(
+            cmd,
+            crate::parser::CommandNode::If { .. }
+                | crate::parser::CommandNode::For { .. }
+                | crate::parser::CommandNode::While { .. }
+                | crate::parser::CommandNode::Loop { .. }
+        );
+
+        let (name, func_body) = match cmd {
+            crate::parser::CommandNode::Simple(s) => {
+                let name = expand_vars(s.name.as_deref().unwrap_or(""), &state.variables);
+                let body = state.functions.get(&name).cloned();
+                (name, body)
+            }
             crate::parser::CommandNode::Break | crate::parser::CommandNode::Continue => {
                 eprintln!("cerf: control flow command in pipeline is currently unsupported");
                 continue;
             }
-            _ => {
-                // For now, complex blocks in pipelines are unsupported in the external pipe forker.
-                eprintln!("cerf: complex blocks in pipelines are currently unsupported");
-                continue;
-            }
+            _ => (String::new(), None),
         };
 
-        if name.is_empty() {
+        if name.is_empty() && !is_block {
             continue;
         }
-
-        // If a builtin appears in a multi-command pipeline, check for exit
-        if name == "exit" {
-            // Kill any children we already spawned
-            for mut child in children {
-                let _ = child.kill();
-            }
-            builtins::system::exit();
-            return (ExecutionResult::Exit, 0);
-        }
-
-        let is_builtin = builtins::registry::find_command(name).is_some();
-        let resolved = if is_builtin {
-            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf"))
-        } else {
-            find_executable(name).unwrap_or_else(|| expand_home(name))
-        };
 
         // Expand globs on the argument list (only used for non-builtins).
         let expanded = expand_args(cmd.args(), state);
         let args = expand_globs(&expanded);
 
+        // A function or control-flow block in a pipeline cannot run in the
+        // parent shell (it needs its own stdin/stdout), so run it as a
+        // subshell script. Functions are serialized with their declaration.
+        let script = if let Some(body) = &func_body {
+            Some(function_call_script(&name, body, &args))
+        } else if is_block {
+            Some(crate::engine::job_control::format_node_full(cmd))
+        } else {
+            None
+        };
+
+        // If a builtin appears in a multi-command pipeline, check for exit
+        if name == "exit" || name == "sys.exit" {
+            // Kill any children we already spawned
+            for mut child in children {
+                let _ = child.kill();
+            }
+            let code = match args.first() {
+                Some(arg) => arg
+                    .parse::<i64>()
+                    .map(|code| (code & 0xff) as i32)
+                    .unwrap_or(2),
+                None => state.last_status,
+            };
+            return (ExecutionResult::Exit, code);
+        }
+
+        let is_builtin = func_body.is_none() && builtins::registry::find_command(&name).is_some();
+        let resolved = if script.is_some() || is_builtin {
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf"))
+        } else {
+            find_executable(&name).unwrap_or_else(|| expand_home(&name))
+        };
+
         #[cfg(windows)]
-        let mut command = if is_builtin {
-            internal_command(name, &args)
+        let mut command = if let Some(script) = &script {
+            let mut command = Command::new(&resolved);
+            command.arg("-c").arg(script);
+            command
+        } else if is_builtin {
+            internal_command(&name, &args)
         } else {
             let is_batch = resolved.extension().is_some_and(|e| {
                 let e = e.to_string_lossy().to_lowercase();
@@ -687,8 +1015,12 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
         };
 
         #[cfg(unix)]
-        let mut command = if is_builtin {
-            internal_command(name, &args)
+        let mut command = if let Some(script) = &script {
+            let mut command = Command::new(&resolved);
+            command.arg("-c").arg(script);
+            command
+        } else if is_builtin {
+            internal_command(&name, &args)
         } else {
             let mut command = Command::new(&resolved);
             command.args(&args);
@@ -698,48 +1030,29 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
         let assignments = expanded_assignments(cmd.assignments(), state);
         command.envs(assignments.iter().map(|(k, v)| (k, v)));
 
-        // Stdin: first command may have < redirect, others get previous pipe
+        // Redirects apply to every pipeline element, not just the first/last
+        // (`cmd 2>err | cat`), and any descriptor may be redirected.
+        if let Err(error) = apply_command_io(&mut command, cmd.redirects(), &pipeline, state) {
+            eprintln!("{}", error);
+            for mut child in children {
+                let _ = child.kill();
+            }
+            return (ExecutionResult::KeepRunning, 1);
+        }
+
+        // Stdin: the first command inherits/null (redirects override in the
+        // child); later commands read the preceding pipe.
         if i == 0 {
-            let (stdin_redir, _) = resolve_redirects(cmd.redirects());
-            if let Some(redir) = stdin_redir {
-                match open_stdin_redirect(redir) {
-                    Ok(f) => {
-                        command.stdin(Stdio::from(f));
-                    }
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        // Kill already started children
-                        for mut child in children {
-                            let _ = child.kill();
-                        }
-                        return (ExecutionResult::KeepRunning, 1);
-                    }
-                }
-            } else if pipeline.background {
+            if pipeline.background {
                 command.stdin(Stdio::null());
             }
         } else if let Some(stdout) = prev_stdout.take() {
             command.stdin(Stdio::from(stdout));
         }
 
-        // Stdout: last command may have > or >> redirect, others pipe
-        if i == last_idx {
-            let (_, stdout_redir) = resolve_redirects(cmd.redirects());
-            if let Some(redir) = stdout_redir {
-                match open_stdout_redirect(redir) {
-                    Ok(f) => {
-                        command.stdout(Stdio::from(f));
-                    }
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        for mut child in children {
-                            let _ = child.kill();
-                        }
-                        return (ExecutionResult::KeepRunning, 1);
-                    }
-                }
-            }
-        } else {
+        // Stdout: everything except the last command feeds a pipe. An
+        // explicit redirect is installed later in the child and wins.
+        if i != last_idx {
             command.stdout(Stdio::piped());
         }
 
@@ -916,6 +1229,7 @@ pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (Exec
         if state.internal_builtin {
             crate::engine::job_control::update_jobs(state);
         }
+        state.last_status = code;
         last_code = code;
 
         match result {
@@ -929,99 +1243,42 @@ pub fn execute_list(entries: Vec<CommandEntry>, state: &mut ShellState) -> (Exec
     (ExecutionResult::KeepRunning, last_code)
 }
 
-#[cfg(not(unix))]
 fn execute_block_with_redirects(
     pipeline: &Pipeline,
     node: &crate::parser::CommandNode,
     redirects: &[crate::parser::Redirect],
     state: &mut ShellState,
 ) -> (ExecutionResult, i32) {
-    // Blocks with redirects run in a subshell.
+    // A block that must not mutate the parent shell (because it is
+    // backgrounded, or because Windows cannot swap the parent's descriptors)
+    // runs as a subshell through the normal process path so job registration,
+    // process groups, and `[1] pid` reporting are identical to an external
+    // command.
+    execute_script_with_redirects(
+        pipeline,
+        &crate::engine::job_control::format_node_full(node),
+        redirects,
+        state,
+    )
+}
+
+fn execute_script_with_redirects(
+    pipeline: &Pipeline,
+    script: &str,
+    redirects: &[crate::parser::Redirect],
+    state: &mut ShellState,
+) -> (ExecutionResult, i32) {
     let mut command =
         Command::new(std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cerf")));
 
-    // We need to format the specific command node.
-    command
-        .arg("-c")
-        .arg(crate::engine::job_control::format_node_full(node));
+    command.arg("-c").arg(script);
 
-    let (stdin_redir, stdout_redir) = resolve_redirects(redirects);
-
-    if let Some(redir) = stdin_redir {
-        let mut expanded_redir = redir.clone();
-        expanded_redir.file = expand_vars(&redir.file, &state.variables);
-        if let Ok(f) = open_stdin_redirect(&expanded_redir) {
-            command.stdin(Stdio::from(f));
-        }
-    }
-    if let Some(redir) = stdout_redir {
-        let mut expanded_redir = redir.clone();
-        expanded_redir.file = expand_vars(&redir.file, &state.variables);
-        if let Ok(f) = open_stdout_redirect(&expanded_redir) {
-            command.stdout(Stdio::from(f));
-        }
+    if let Err(error) = apply_redirects_to_command(&mut command, redirects, state) {
+        eprintln!("{}", error);
+        return (ExecutionResult::KeepRunning, 1);
     }
 
-    if pipeline.background {
-        match command.spawn() {
-            Ok(child) => {
-                let pid = child.id();
-                let job_id = state.next_job_id;
-                println!("[{}] {}", job_id, pid);
-
-                #[cfg(windows)]
-                let job_handle = unsafe {
-                    let handle = windows_sys::Win32::System::JobObjects::CreateJobObjectW(
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
-                    windows_sys::Win32::System::IO::CreateIoCompletionPort(
-                        handle,
-                        state.iocp_handle as _,
-                        job_id as _,
-                        0,
-                    );
-                    windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
-                        handle,
-                        std::os::windows::io::AsRawHandle::as_raw_handle(&child) as _,
-                    );
-                    handle as isize
-                };
-
-                let job = crate::engine::state::Job {
-                    id: job_id,
-                    #[cfg(unix)]
-                    pgid: pid,
-                    #[cfg(windows)]
-                    job_handle,
-                    command: crate::engine::job_control::format_command(pipeline),
-                    processes: vec![crate::engine::state::ProcessInfo {
-                        pid,
-                        state: crate::engine::state::JobState::Running,
-                    }],
-                    reported_done: false,
-                };
-                state.jobs.insert(job_id, job);
-                state.next_job_id += 1;
-                (ExecutionResult::KeepRunning, 0)
-            }
-            Err(e) => {
-                eprintln!("cerf: error backgrounding block: {}", e);
-                (ExecutionResult::KeepRunning, 1)
-            }
-        }
-    } else {
-        match command.spawn() {
-            Ok(mut child) => {
-                let status = child.wait().map(|s| s.code().unwrap_or(0)).unwrap_or(1);
-                (ExecutionResult::KeepRunning, status)
-            }
-            Err(e) => {
-                eprintln!("cerf: error executing block: {}", e);
-                (ExecutionResult::KeepRunning, 1)
-            }
-        }
-    }
+    execute_process(command, "<block>", pipeline, state, None)
 }
 
 /// Execute a single command node in the current shell process.
@@ -1145,7 +1402,25 @@ fn execute_node(
         crate::parser::CommandNode::Simple(cmd) => {
             let name = expand_vars(cmd.name.as_deref().unwrap_or(""), &state.variables);
             if let Some(func_body) = state.functions.get(&name).cloned() {
+                // Function arguments become the positional parameters for
+                // the duration of the call, and prefix assignments apply.
+                let expanded = expand_args(&cmd.args, state);
+                let args = expand_globs(&expanded);
+                let assignments = expanded_assignments(&cmd.assignments, state);
+                let saved_assignments = match apply_scoped_assignments(state, &assignments) {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        eprintln!("{}", error);
+                        return (ExecutionResult::KeepRunning, 1);
+                    }
+                };
+
+                let saved_positional = state.positional_args.clone();
+                state.set_positional_parameters(&args);
                 let (res, code) = execute_list(func_body, state);
+                state.set_positional_parameters(&saved_positional);
+                restore_scoped_assignments(state, saved_assignments);
+
                 let final_code = if pipeline.negated {
                     if code == 0 { 1 } else { 0 }
                 } else {

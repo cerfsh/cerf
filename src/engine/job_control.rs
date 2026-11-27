@@ -49,6 +49,7 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
             }
             if fg {
                 state.jobs.remove(&job_id);
+                clear_current_job(state, job_id);
             }
             break;
         }
@@ -160,6 +161,7 @@ pub fn wait_for_job(job_id: usize, state: &mut ShellState, fg: bool) -> i32 {
             }
             if fg {
                 state.jobs.remove(&job_id);
+                clear_current_job(state, job_id);
             }
             break;
         }
@@ -273,6 +275,7 @@ pub fn update_jobs(state: &mut ShellState) {
 
     for id in to_remove {
         state.jobs.remove(&id);
+        clear_current_job(state, id);
     }
 }
 
@@ -304,6 +307,7 @@ pub fn update_jobs(state: &mut ShellState) {
 
     for id in to_remove {
         state.jobs.remove(&id);
+        clear_current_job(state, id);
     }
 }
 
@@ -331,13 +335,7 @@ pub fn format_node_full(node: &crate::parser::CommandNode) -> String {
             let mut rendered = parts.join(" ");
             for redirect in &s.redirects {
                 rendered.push(' ');
-                rendered.push_str(match redirect.kind {
-                    crate::parser::RedirectKind::StdoutOverwrite => ">",
-                    crate::parser::RedirectKind::StdoutAppend => ">>",
-                    crate::parser::RedirectKind::StdinFrom => "<",
-                });
-                rendered.push(' ');
-                rendered.push_str(&quote_word(&redirect.file));
+                rendered.push_str(&crate::engine::redirect::format_redirect(redirect));
             }
             rendered
         }
@@ -407,7 +405,7 @@ pub fn format_node_full(node: &crate::parser::CommandNode) -> String {
 }
 
 /// Quote a word so the rendered command is unambiguous (display only).
-fn quote_word(word: &str) -> String {
+pub(crate) fn quote_word(word: &str) -> String {
     if !word.is_empty()
         && word
             .chars()
@@ -451,6 +449,24 @@ pub fn resume_job(job: &mut crate::engine::state::Job) {
     }
 }
 
+/// Forget a job after it has been removed from the table.
+///
+/// `current_job`/`previous_job` must not keep pointing at a deleted job, or a
+/// later bare `fg`/`bg` resolves `%+` to a job that no longer exists.
+pub fn clear_current_job(state: &mut ShellState, job_id: usize) {
+    if state.current_job == Some(job_id) {
+        state.current_job = state.jobs.keys().copied().max();
+    }
+    if state.previous_job == Some(job_id) {
+        state.previous_job = state
+            .jobs
+            .keys()
+            .copied()
+            .filter(|&id| Some(id) != state.current_job)
+            .max();
+    }
+}
+
 pub fn set_current_job(state: &mut ShellState, job_id: usize) {
     if state.current_job == Some(job_id) {
         return;
@@ -463,10 +479,21 @@ pub fn resolve_job_specifier(arg: &str, state: &ShellState) -> Result<usize, Str
     if arg == "%+" || arg == "%%" {
         return state
             .current_job
+            .filter(|id| state.jobs.contains_key(id))
+            .or_else(|| state.jobs.keys().copied().max())
             .ok_or_else(|| "current: no such job".to_string());
     } else if arg == "%-" {
         return state
             .previous_job
+            .filter(|id| state.jobs.contains_key(id))
+            .or_else(|| {
+                state
+                    .jobs
+                    .keys()
+                    .copied()
+                    .filter(|&id| Some(id) != state.current_job)
+                    .max()
+            })
             .ok_or_else(|| "previous: no such job".to_string());
     } else if let Some(id_str) = arg.strip_prefix('%') {
         if let Ok(id) = id_str.parse::<usize>() {

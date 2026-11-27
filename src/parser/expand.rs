@@ -35,6 +35,22 @@ pub fn expand_vars(
                     .unwrap_or_default();
                 result.push_str(&value);
             }
+            // Positional and special parameters: `$1`, `$#`, `$@`, `$*`.
+            Some(&c) if c.is_ascii_digit() || matches!(c, '#' | '@' | '*') => {
+                chars.next();
+                let value = shell_vars
+                    .get(&c.to_string())
+                    .map(|v| v.value.as_string())
+                    .unwrap_or_else(|| {
+                        // `$#` is 0 when no positional parameters exist.
+                        if c == '#' {
+                            "0".to_string()
+                        } else {
+                            String::new()
+                        }
+                    });
+                result.push_str(&value);
+            }
             // $VAR style — identifier starts with alpha or '_'
             Some(&c) if c.is_ascii_alphabetic() || c == '_' => {
                 let var_name: String = std::iter::once(chars.next().unwrap())
@@ -98,6 +114,7 @@ mod tests {
             .map(|(text, expand)| WordPart {
                 text: text.to_string(),
                 expand: *expand,
+                glob: *expand,
             })
             .collect()
     }

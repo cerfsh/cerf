@@ -3,31 +3,29 @@ use crate::parser::Arg;
 /// Expand glob patterns in a list of arguments.
 ///
 /// For each argument:
-/// - If `quoted == true` → push the raw value unchanged (quoted args are never
-///   glob-expanded, matching POSIX shell behaviour).
-/// - If the value contains glob meta-characters (`*`, `?`, `[`) → call
-///   `glob::glob()` on it.
+/// - If no unquoted glob metacharacter remains → push the raw value unchanged.
+/// - Otherwise build a pattern where quoted or backslash-escaped `*?[]` are
+///   escaped literally, then call `glob::glob()`.
 ///   - If matches are found → push all matches (sorted lexicographically).
-///   - If no matches → push the original pattern unchanged (bash default).
-/// - Otherwise → push the raw value unchanged.
+///   - If no matches → push the original value unchanged (bash default).
 pub fn expand_globs(args: &[Arg]) -> Vec<String> {
     let mut expanded: Vec<String> = Vec::new();
 
     for arg in args {
-        if arg.quoted || !contains_glob_chars(&arg.value) {
+        let Some(pattern) = glob_pattern(arg) else {
             expanded.push(arg.value.clone());
             continue;
-        }
+        };
 
         // Attempt glob expansion. The glob crate matches dotfiles by default,
         // so filter them out unless the pattern component itself starts with a
         // dot (POSIX shell behaviour).
-        match glob::glob(&arg.value) {
+        match glob::glob(&pattern) {
             Ok(paths) => {
                 let mut matches: Vec<String> = paths
                     .filter_map(|entry| entry.ok())
                     .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|matched| dotfile_rule_allows(&arg.value, matched))
+                    .filter(|matched| dotfile_rule_allows(&pattern, matched))
                     .collect();
 
                 if matches.is_empty() {
@@ -46,6 +44,43 @@ pub fn expand_globs(args: &[Arg]) -> Vec<String> {
     }
 
     expanded
+}
+
+/// Build the glob pattern for an argument, or `None` when it must not be
+/// expanded.
+///
+/// Parts retain the quoting information from parsing. A metacharacter in a
+/// part with `glob == false` is replaced by `glob::Pattern::escape`, so it
+/// matches itself instead of acting as a wildcard. This is what makes
+/// `"file[1]".txt` name the literal file rather than `file1.txt`.
+fn glob_pattern(arg: &Arg) -> Option<String> {
+    if arg.parts.is_empty() {
+        // Programmatically built arguments carry no part metadata; `quoted`
+        // still suppresses expansion for them.
+        if arg.quoted || !contains_glob_chars(&arg.value) {
+            return None;
+        }
+        return Some(arg.value.clone());
+    }
+
+    let mut pattern = String::new();
+    let mut has_active_glob = false;
+    for part in &arg.parts {
+        for ch in part.text.chars() {
+            if matches!(ch, '*' | '?' | '[' | ']') {
+                if part.glob {
+                    pattern.push(ch);
+                    has_active_glob = true;
+                } else {
+                    pattern.push_str(&glob::Pattern::escape(&ch.to_string()));
+                }
+            } else {
+                pattern.push(ch);
+            }
+        }
+    }
+
+    if has_active_glob { Some(pattern) } else { None }
 }
 
 /// Check the POSIX rule that a leading dot must be matched literally.
@@ -95,6 +130,15 @@ fn contains_glob_chars(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::WordPart;
+
+    fn part(text: &str, glob: bool) -> WordPart {
+        WordPart {
+            text: text.to_string(),
+            expand: true,
+            glob,
+        }
+    }
 
     #[test]
     fn test_no_glob_chars_passes_through() {
@@ -108,6 +152,23 @@ mod tests {
         let args = vec![Arg::new("*.rs", true)];
         let result = expand_globs(&args);
         assert_eq!(result, vec!["*.rs"]);
+    }
+
+    #[test]
+    fn test_partially_quoted_metacharacters_are_literal() {
+        let literal = Arg::from_parts(vec![part("file[1]", false), part(".txt", true)], false);
+        let wildcard = Arg::from_parts(vec![part("*", false), part(".txt", true)], false);
+        assert_eq!(glob_pattern(&literal), None);
+        assert_eq!(glob_pattern(&wildcard), None);
+        assert_eq!(expand_globs(&[literal]), vec!["file[1].txt"]);
+        assert_eq!(expand_globs(&[wildcard]), vec!["*.txt"]);
+    }
+
+    #[test]
+    fn test_mixed_quoted_and_unquoted_glob() {
+        // `"pre*"` is literal but the trailing `*` is active.
+        let arg = Arg::from_parts(vec![part("pre*", false), part("*", true)], false);
+        assert_eq!(glob_pattern(&arg), Some("pre[*]*".to_string()));
     }
 
     #[test]
