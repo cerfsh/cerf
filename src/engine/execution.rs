@@ -244,7 +244,6 @@ fn apply_redirects_to_command(
 ) -> Result<(), String> {
     use std::fs::File;
 
-    #[derive(Clone)]
     enum WinSource {
         File(File),
         Inherit,
@@ -271,13 +270,14 @@ fn apply_redirects_to_command(
         match redirect.source {
             RedirectSource::File(file) => slots[fd] = Some(WinSource::File(file)),
             RedirectSource::Dup(target) => {
-                let source = usize::try_from(target).ok().and_then(|target| {
-                    if target < slots.len() {
-                        slots[target].clone()
-                    } else {
-                        Some(WinSource::Inherit)
-                    }
-                });
+                let source = match usize::try_from(target) {
+                    Ok(target) if target < slots.len() => slots[target]
+                        .as_ref()
+                        .map(WinSource::try_clone)
+                        .transpose()
+                        .map_err(|error| format!("cerf: redirect: {}", error))?,
+                    _ => Some(WinSource::Inherit),
+                };
                 slots[fd] = source.or(Some(WinSource::Inherit));
             }
         }
