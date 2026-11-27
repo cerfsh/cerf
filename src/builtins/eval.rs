@@ -19,7 +19,9 @@ pub fn eval_runner(args: &[String], state: &mut ShellState) -> (ExecutionResult,
 
     if let Some(entries) = parser::parse_pipeline(&command_str, &state.variables) {
         engine::execute_list(entries, state)
-    } else {
+    } else if parser::is_blank_or_comment_only(&command_str) {
         (ExecutionResult::KeepRunning, 0)
+    } else {
+        (ExecutionResult::KeepRunning, 2)
     }
 }

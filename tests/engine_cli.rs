@@ -1127,3 +1127,29 @@ fn local_outside_a_function_is_an_error() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn source_and_eval_report_syntax_errors() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let bad = directory.path().join("bad.cerf");
+    std::fs::write(&bad, "bad |\n").expect("write script");
+
+    let sourced = cerf()
+        .args(["-c", &format!("source '{}'", bad.display())])
+        .output()
+        .expect("run cerf");
+    assert_eq!(sourced.status.code(), Some(2));
+
+    let evaluated = cerf()
+        .args(["-c", "eval 'if {'"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(evaluated.status.code(), Some(2));
+
+    // Blank/comment-only input remains a successful no-op.
+    let blank = cerf()
+        .args(["-c", "eval '# just a comment'"])
+        .output()
+        .expect("run cerf");
+    assert!(blank.status.success());
+}

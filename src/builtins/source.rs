@@ -70,7 +70,13 @@ pub fn run(args: &[String], state: &mut ShellState) -> (ExecutionResult, i32) {
         }
         None => {
             last_result = ExecutionResult::KeepRunning;
-            last_code = 0;
+            // A blank/comment-only file is a successful no-op; anything else
+            // that failed to parse is a syntax error.
+            last_code = if parser::is_blank_or_comment_only(&contents) {
+                0
+            } else {
+                2
+            };
         }
     }
 
