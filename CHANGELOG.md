@@ -14,6 +14,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-28
+
 The low-priority correctness sweep: argument, path, and file handling now
 match the documented shell behavior, Windows console control is forwarded to
 the foreground job, and `net.http` no longer has a check-then-open race.
@@ -303,7 +305,8 @@ tracked in detail.
   brace-style control flow, functions, variables, aliases, globbing, history,
   job control, and Windows/Unix support.
 
-[Unreleased]: https://github.com/cerfsh/cerf/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/cerfsh/cerf/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/cerfsh/cerf/releases/tag/v0.3.3
 [0.3.2]: https://github.com/cerfsh/cerf/releases/tag/v0.3.2
 [0.3.1]: https://github.com/cerfsh/cerf/releases/tag/v0.3.1
 [0.3.0]: https://github.com/cerfsh/cerf/releases/tag/v0.3.0
