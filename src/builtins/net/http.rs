@@ -347,11 +347,24 @@ fn platform_opened_path(_file: &File) -> Option<PathBuf> {
     None
 }
 
+/// Normalize a Windows path for case-insensitive, prefix-insensitive
+/// comparison. `canonicalize` adds a `\\?\` verbatim prefix that the
+/// handle-based path may or may not carry.
+#[cfg(windows)]
+fn normalize_windows_path(path: &Path) -> String {
+    let value = path.to_string_lossy().to_lowercase();
+    let value = value.strip_prefix(r"\\?\").unwrap_or(&value).to_string();
+    match value.strip_prefix("unc\\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => value,
+    }
+}
+
 /// True when `path` is `root` itself or lies beneath it.
 #[cfg(windows)]
 fn path_is_beneath(root: &Path, path: &Path) -> bool {
-    let root = root.to_string_lossy().to_lowercase();
-    let path = path.to_string_lossy().to_lowercase();
+    let root = normalize_windows_path(root);
+    let path = normalize_windows_path(path);
     if !path.starts_with(&root) {
         return false;
     }
