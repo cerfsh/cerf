@@ -754,10 +754,7 @@ mod tests {
     fn break_and_continue_require_a_word_boundary() {
         assert!(matches!(parse_node("break"), CommandNode::Break));
         assert!(matches!(parse_node("continue"), CommandNode::Continue));
-        assert!(matches!(
-            parse_prefix("break;").1,
-            CommandNode::Break
-        ));
+        assert!(matches!(parse_prefix("break;").1, CommandNode::Break));
 
         match parse_node("breakfast") {
             CommandNode::Simple(cmd) => assert_eq!(cmd.name.as_deref(), Some("breakfast")),

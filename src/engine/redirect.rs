@@ -91,10 +91,7 @@ pub fn prepare_redirects(
 ///
 /// Used for commands that consist only of assignments: `VAR=x > file` still
 /// creates/truncates `file` in a real shell.
-pub fn touch_redirect_files(
-    redirects: &[Redirect],
-    state: &ShellState,
-) -> Result<(), String> {
+pub fn touch_redirect_files(redirects: &[Redirect], state: &ShellState) -> Result<(), String> {
     drop(prepare_redirects(redirects, state)?);
     Ok(())
 }

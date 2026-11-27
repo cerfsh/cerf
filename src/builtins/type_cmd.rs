@@ -92,10 +92,7 @@ mod tests {
         assert_eq!(run(&[], &aliases), 0);
         assert_eq!(run(&["io.echo".to_string()], &aliases), 0);
         assert_eq!(
-            run(
-                &["cerf-definitely-missing-command".to_string()],
-                &aliases
-            ),
+            run(&["cerf-definitely-missing-command".to_string()], &aliases),
             1
         );
     }

@@ -121,9 +121,7 @@ async fn serve(options: HttpOptions) -> Result<(), String> {
 }
 
 fn router(root: Arc<PathBuf>) -> Router {
-    Router::new()
-        .fallback(get(serve_request))
-        .with_state(root)
+    Router::new().fallback(get(serve_request)).with_state(root)
 }
 
 /// Resolve and open the target exactly once.
@@ -147,7 +145,9 @@ async fn serve_request(
                 header::HeaderValue::from_static(content_type),
             );
             if let Ok(length) = header::HeaderValue::from_str(&len.to_string()) {
-                response.headers_mut().insert(header::CONTENT_LENGTH, length);
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_LENGTH, length);
             }
             response
         }
@@ -167,11 +167,7 @@ async fn serve_request(
 }
 
 enum Served {
-    File {
-        file: File,
-        path: PathBuf,
-        len: u64,
-    },
+    File { file: File, path: PathBuf, len: u64 },
     Listing(String),
     Redirect(String),
 }
@@ -303,13 +299,8 @@ fn platform_opened_path(file: &File) -> Option<PathBuf> {
 fn platform_opened_path(file: &File) -> Option<PathBuf> {
     use std::os::fd::AsRawFd;
     let mut buffer = [0i8; nix::libc::PATH_MAX as usize];
-    let result = unsafe {
-        nix::libc::fcntl(
-            file.as_raw_fd(),
-            nix::libc::F_GETPATH,
-            buffer.as_mut_ptr(),
-        )
-    };
+    let result =
+        unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_GETPATH, buffer.as_mut_ptr()) };
     if result == -1 {
         return None;
     }
@@ -321,7 +312,10 @@ fn platform_opened_path(file: &File) -> Option<PathBuf> {
     String::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos", target_os = "ios"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "macos", target_os = "ios"))
+))]
 fn platform_opened_path(file: &File) -> Option<PathBuf> {
     use std::os::fd::AsRawFd;
     std::fs::read_link(format!("/dev/fd/{}", file.as_raw_fd())).ok()
@@ -338,9 +332,8 @@ fn platform_opened_path(file: &File) -> Option<PathBuf> {
         return None;
     }
     let mut buffer = vec![0u16; needed as usize + 1];
-    let written = unsafe {
-        GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
-    };
+    let written =
+        unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) };
     if written == 0 || written as usize >= buffer.len() {
         return None;
     }
@@ -451,14 +444,14 @@ fn directory_read_path(file: &File, _candidate: &Path) -> PathBuf {
 fn directory_read_path(file: &File, candidate: &Path) -> PathBuf {
     use std::os::fd::AsRawFd;
     let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
-    if path.exists() { path } else { candidate.to_path_buf() }
+    if path.exists() {
+        path
+    } else {
+        candidate.to_path_buf()
+    }
 }
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "ios"
-)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
 fn directory_read_path(_file: &File, candidate: &Path) -> PathBuf {
     candidate.to_path_buf()
 }

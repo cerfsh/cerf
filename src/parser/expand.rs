@@ -19,7 +19,9 @@ pub fn expand_vars(
 /// Expand variable references using the shell's full lookup chain, including
 /// local scopes pushed by function calls.
 pub fn expand_vars_in_state(input: &str, state: &crate::engine::state::ShellState) -> String {
-    expand_vars_with(input, |name| state.get_var(name).map(|v| v.value.as_string()))
+    expand_vars_with(input, |name| {
+        state.get_var(name).map(|v| v.value.as_string())
+    })
 }
 
 fn expand_vars_with<F>(input: &str, lookup: F) -> String

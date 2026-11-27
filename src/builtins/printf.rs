@@ -288,7 +288,11 @@ fn format_value(spec: &FormatSpec, argument: &str) -> (String, bool) {
             stop = escape_stopped;
             truncate_chars(&expanded, spec.precision)
         }
-        'c' => argument.chars().next().map(String::from).unwrap_or_default(),
+        'c' => argument
+            .chars()
+            .next()
+            .map(String::from)
+            .unwrap_or_default(),
         'd' | 'i' => {
             let value = parse_signed(argument);
             signed_digits(value, 10, false, spec.precision)
@@ -337,7 +341,10 @@ fn truncate_chars(value: &str, precision: Option<usize>) -> String {
 
 fn parse_signed(argument: &str) -> i64 {
     let trimmed = argument.trim();
-    if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         i64::from_str_radix(rest, 16).unwrap_or(0)
     } else if let Some(rest) = trimmed.strip_prefix('0').filter(|rest| !rest.is_empty()) {
         i64::from_str_radix(rest, 8).unwrap_or(0)
@@ -348,7 +355,10 @@ fn parse_signed(argument: &str) -> i64 {
 
 fn parse_unsigned(argument: &str) -> u64 {
     let trimmed = argument.trim();
-    if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         u64::from_str_radix(rest, 16).unwrap_or(0)
     } else {
         trimmed.parse().unwrap_or(0)
@@ -359,12 +369,7 @@ fn parse_float(argument: &str) -> f64 {
     argument.trim().parse().unwrap_or(0.0)
 }
 
-fn signed_digits(
-    value: i64,
-    radix: u32,
-    uppercase: bool,
-    precision: Option<usize>,
-) -> String {
+fn signed_digits(value: i64, radix: u32, uppercase: bool, precision: Option<usize>) -> String {
     let negative = value < 0;
     let magnitude = value.unsigned_abs();
     let mut digits = if uppercase {
@@ -388,12 +393,7 @@ fn signed_digits(
     }
 }
 
-fn unsigned_digits(
-    value: u64,
-    radix: u32,
-    uppercase: bool,
-    precision: Option<usize>,
-) -> String {
+fn unsigned_digits(value: u64, radix: u32, uppercase: bool, precision: Option<usize>) -> String {
     let mut digits = if uppercase {
         format!("{:X}", value)
     } else {

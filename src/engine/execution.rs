@@ -1111,9 +1111,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
             use std::os::windows::process::CommandExt;
             // Background pipeline members get their own group so a Ctrl-C
             // aimed at the shell's console group does not stop them.
-            command.creation_flags(
-                windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
-            );
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
         }
 
         #[cfg(windows)]

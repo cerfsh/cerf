@@ -95,7 +95,10 @@ mod tests {
 
     #[test]
     fn splits_single_double_and_unquoted_words() {
-        assert_eq!(shell_split("echo 'a b' \"c d\""), vec!["echo", "a b", "c d"]);
+        assert_eq!(
+            shell_split("echo 'a b' \"c d\""),
+            vec!["echo", "a b", "c d"]
+        );
         assert_eq!(
             shell_split(r#"printf "%s\n" "x y""#),
             vec!["printf", "%s\\n", "x y"]

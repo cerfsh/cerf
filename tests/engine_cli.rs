@@ -1116,10 +1116,7 @@ fn local_variables_stay_inside_functions() {
 
 #[test]
 fn local_outside_a_function_is_an_error() {
-    let output = cerf()
-        .args(["-c", "local x=1"])
-        .output()
-        .expect("run cerf");
+    let output = cerf().args(["-c", "local x=1"]).output().expect("run cerf");
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("can only be used in a function"),
@@ -1303,7 +1300,10 @@ fn du_reports_allocated_blocks_and_counts_hard_links_once() {
     std::fs::hard_link(&first, &second).expect("hard link");
 
     let output = cerf()
-        .args(["-c", &format!("fs.du '{}' '{}'", first.display(), second.display())])
+        .args([
+            "-c",
+            &format!("fs.du '{}' '{}'", first.display(), second.display()),
+        ])
         .output()
         .expect("run cerf");
     assert!(output.status.success());
@@ -1496,10 +1496,7 @@ fn huge_timeouts_are_rejected_without_panicking() {
         format!("net.socket 127.0.0.1 80 --connect-timeout {huge}"),
         format!("net.socket --udp 127.0.0.1 80 --idle-timeout {huge}"),
     ] {
-        let output = cerf()
-            .args(["-c", &command])
-            .output()
-            .expect("run cerf");
+        let output = cerf().args(["-c", &command]).output().expect("run cerf");
         assert_eq!(
             output.status.code(),
             Some(1),

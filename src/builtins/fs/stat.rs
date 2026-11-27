@@ -56,17 +56,9 @@ pub fn runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult, i32
                     "special file"
                 };
 
-                match (!dereference)
-                    .then(|| fs::read_link(&path).ok())
-                    .flatten()
-                {
+                match (!dereference).then(|| fs::read_link(&path).ok()).flatten() {
                     Some(target) => {
-                        let _ = writeln!(
-                            output,
-                            "  File: {} -> {}",
-                            arg,
-                            target.to_string_lossy()
-                        );
+                        let _ = writeln!(output, "  File: {} -> {}", arg, target.to_string_lossy());
                     }
                     None => {
                         let _ = writeln!(output, "  File: {}", arg);

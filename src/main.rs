@@ -17,7 +17,10 @@ pub static FG_JOB: AtomicUsize = AtomicUsize::new(0);
 
 /// Parsed command-line invocation.
 enum Cli {
-    InternalBuiltin { name: String, args: Vec<String> },
+    InternalBuiltin {
+        name: String,
+        args: Vec<String>,
+    },
     Script {
         script: String,
         positional: Vec<String>,
