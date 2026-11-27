@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 
 use super::path::expand_home;
-use crate::engine::state::Variable;
-use crate::parser::{Redirect, RedirectKind, expand_vars};
+use crate::engine::state::ShellState;
+use crate::parser::{Redirect, RedirectKind, expand_vars_in_state};
 
 /// Open a file for an output redirect.
 pub fn open_stdout_redirect(redirect: &Redirect) -> Result<File, String> {
@@ -50,7 +49,7 @@ pub enum RedirectSource {
 /// POSIX redirection order. The caller applies the returned list in order.
 pub fn prepare_redirects(
     redirects: &[Redirect],
-    variables: &HashMap<String, Variable>,
+    state: &ShellState,
 ) -> Result<Vec<PreparedRedirect>, String> {
     let mut prepared = Vec::with_capacity(redirects.len());
     for redirect in redirects {
@@ -69,7 +68,7 @@ pub fn prepare_redirects(
             }
             RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend => {
                 let mut expanded = redirect.clone();
-                expanded.file = expand_vars(&redirect.file, variables);
+                expanded.file = expand_vars_in_state(&redirect.file, state);
                 prepared.push(PreparedRedirect {
                     fd: redirect.fd,
                     source: RedirectSource::File(open_stdout_redirect(&expanded)?),
@@ -77,7 +76,7 @@ pub fn prepare_redirects(
             }
             RedirectKind::StdinFrom => {
                 let mut expanded = redirect.clone();
-                expanded.file = expand_vars(&redirect.file, variables);
+                expanded.file = expand_vars_in_state(&redirect.file, state);
                 prepared.push(PreparedRedirect {
                     fd: redirect.fd,
                     source: RedirectSource::File(open_stdin_redirect(&expanded)?),
@@ -94,9 +93,9 @@ pub fn prepare_redirects(
 /// creates/truncates `file` in a real shell.
 pub fn touch_redirect_files(
     redirects: &[Redirect],
-    variables: &HashMap<String, Variable>,
+    state: &ShellState,
 ) -> Result<(), String> {
-    drop(prepare_redirects(redirects, variables)?);
+    drop(prepare_redirects(redirects, state)?);
     Ok(())
 }
 

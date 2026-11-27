@@ -41,6 +41,11 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
 
     let targets = &args[i..];
 
+    if local_scope && state.scopes.is_empty() {
+        eprintln!("cerf: local: can only be used in a function");
+        return 1;
+    }
+
     if targets.is_empty() {
         // Just print
         return 0;
@@ -114,7 +119,7 @@ pub fn run(args: &[String], state: &mut ShellState, local_scope: bool) -> i32 {
         }
 
         if local_scope {
-            state.set_local_var(name, var);
+            let _ = state.set_local_var(name, var);
         } else {
             state.set_var(name, var);
         }

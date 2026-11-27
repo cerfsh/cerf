@@ -6,10 +6,26 @@
 ///   (identifier chars: ASCII alphanumeric + `_`)
 /// - `${VAR}`    → same, with brace delimiters
 /// - Bare `$` with no following identifier or `{` → kept as-is
+#[cfg(test)]
 pub fn expand_vars(
     input: &str,
     shell_vars: &std::collections::HashMap<String, crate::engine::state::Variable>,
 ) -> String {
+    expand_vars_with(input, |name| {
+        shell_vars.get(name).map(|v| v.value.as_string())
+    })
+}
+
+/// Expand variable references using the shell's full lookup chain, including
+/// local scopes pushed by function calls.
+pub fn expand_vars_in_state(input: &str, state: &crate::engine::state::ShellState) -> String {
+    expand_vars_with(input, |name| state.get_var(name).map(|v| v.value.as_string()))
+}
+
+fn expand_vars_with<F>(input: &str, lookup: F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
@@ -45,26 +61,19 @@ pub fn expand_vars(
                     result.push_str(&var_name);
                     continue;
                 }
-                let value = shell_vars
-                    .get(&var_name)
-                    .map(|v| v.value.as_string())
-                    .unwrap_or_default();
-                result.push_str(&value);
+                result.push_str(&lookup(&var_name).unwrap_or_default());
             }
             // Positional and special parameters: `$1`, `$#`, `$@`, `$*`.
             Some(&c) if c.is_ascii_digit() || matches!(c, '#' | '@' | '*') => {
                 chars.next();
-                let value = shell_vars
-                    .get(&c.to_string())
-                    .map(|v| v.value.as_string())
-                    .unwrap_or_else(|| {
-                        // `$#` is 0 when no positional parameters exist.
-                        if c == '#' {
-                            "0".to_string()
-                        } else {
-                            String::new()
-                        }
-                    });
+                let value = lookup(&c.to_string()).unwrap_or_else(|| {
+                    // `$#` is 0 when no positional parameters exist.
+                    if c == '#' {
+                        "0".to_string()
+                    } else {
+                        String::new()
+                    }
+                });
                 result.push_str(&value);
             }
             // $VAR style — identifier starts with alpha or '_'
@@ -74,11 +83,7 @@ pub fn expand_vars(
                         chars.next_if(|c| c.is_ascii_alphanumeric() || *c == '_')
                     }))
                     .collect();
-                let value = shell_vars
-                    .get(&var_name)
-                    .map(|v| v.value.as_string())
-                    .unwrap_or_default();
-                result.push_str(&value);
+                result.push_str(&lookup(&var_name).unwrap_or_default());
             }
             // Bare $ with no following identifier → keep as-is
             _ => {
@@ -94,6 +99,7 @@ pub fn expand_vars(
 ///
 /// Text protected by single quotes or a backslash is copied verbatim, so the
 /// resulting value is data and never re-parsed as shell syntax.
+#[cfg(test)]
 pub fn expand_arg(
     arg: &crate::parser::Arg,
     shell_vars: &std::collections::HashMap<String, crate::engine::state::Variable>,
@@ -105,6 +111,25 @@ pub fn expand_arg(
     for part in &arg.parts {
         if part.expand {
             result.push_str(&expand_vars(&part.text, shell_vars));
+        } else {
+            result.push_str(&part.text);
+        }
+    }
+    result
+}
+
+/// Like [`expand_arg`], but resolves variables through local function scopes.
+pub fn expand_arg_in_state(
+    arg: &crate::parser::Arg,
+    state: &crate::engine::state::ShellState,
+) -> String {
+    if arg.parts.is_empty() {
+        return arg.value.clone();
+    }
+    let mut result = String::with_capacity(arg.value.len());
+    for part in &arg.parts {
+        if part.expand {
+            result.push_str(&expand_vars_in_state(&part.text, state));
         } else {
             result.push_str(&part.text);
         }

@@ -9,7 +9,7 @@ pub use ast::{
     WordPart,
 };
 pub use combinators::is_reserved_word;
-pub use expand::{expand_arg, expand_vars};
+pub use expand::{expand_arg_in_state, expand_vars_in_state};
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -659,7 +659,7 @@ mod tests {
             "PATH".to_string(),
             crate::engine::state::Variable::new_string("some_path".to_string()),
         );
-        let expanded = expand_vars("echo $PATH", &vars);
+        let expanded = expand::expand_vars("echo $PATH", &vars);
         assert!(
             expanded.contains("some_path"),
             "expanded line should contain the PATH value"

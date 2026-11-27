@@ -3,7 +3,9 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use crate::builtins;
-use crate::parser::{Arg, CommandEntry, Connector, Pipeline, expand_arg, expand_vars};
+use crate::parser::{
+    Arg, CommandEntry, Connector, Pipeline, expand_arg_in_state, expand_vars_in_state,
+};
 #[cfg(unix)]
 use crate::signals;
 
@@ -30,7 +32,7 @@ fn expand_args(args: &[Arg], state: &ShellState) -> Vec<Arg> {
             let mut parts: Vec<crate::parser::WordPart> = Vec::new();
             for part in &arg.parts {
                 let text = if part.expand {
-                    expand_vars(&part.text, &state.variables)
+                    expand_vars_in_state(&part.text, state)
                 } else {
                     part.text.clone()
                 };
@@ -66,7 +68,7 @@ fn expanded_assignments(
 ) -> Vec<(String, String)> {
     assignments
         .iter()
-        .map(|(key, value)| (key.clone(), expand_arg(value, &state.variables)))
+        .map(|(key, value)| (key.clone(), expand_arg_in_state(value, state)))
         .collect()
 }
 
@@ -218,7 +220,7 @@ fn apply_redirects_to_command(
     if redirects.is_empty() {
         return Ok(());
     }
-    let prepared = prepare_redirects(redirects, &state.variables)?;
+    let prepared = prepare_redirects(redirects, state)?;
     unsafe {
         command.pre_exec(move || {
             for redirect in &prepared {
@@ -260,7 +262,7 @@ fn apply_redirects_to_command(
     // Std support only exposes 0/1/2; resolve duplications against the
     // final source for those descriptors.
     let mut slots: [Option<WinSource>; 3] = [None, None, None];
-    for redirect in prepare_redirects(redirects, &state.variables)? {
+    for redirect in prepare_redirects(redirects, state)? {
         let Ok(fd) = usize::try_from(redirect.fd) else {
             continue;
         };
@@ -322,7 +324,7 @@ fn simple_is_in_process_builtin(cmd: &crate::parser::SimpleCommand, state: &Shel
     let Some(raw_name) = cmd.name.as_deref() else {
         return false;
     };
-    let name = expand_vars(raw_name, &state.variables);
+    let name = expand_vars_in_state(raw_name, state);
     // Functions run in this process (so state changes survive) and therefore
     // need their redirects applied by swapping descriptors here.
     if state.functions.contains_key(&name) {
@@ -350,7 +352,7 @@ impl StdioRedirect {
         use std::io::Write as _;
         use std::os::fd::IntoRawFd as _;
 
-        let prepared = prepare_redirects(redirects, &state.variables)?;
+        let prepared = prepare_redirects(redirects, state)?;
 
         let _ = std::io::stdout().flush();
         let mut guard = StdioRedirect { saved: Vec::new() };
@@ -436,7 +438,7 @@ impl StdioRedirect {
             }
         }
 
-        let prepared = prepare_redirects(redirects, &state.variables)?;
+        let prepared = prepare_redirects(redirects, state)?;
         let _ = std::io::stdout().flush();
         let mut guard = StdioRedirect {
             saved: Vec::new(),
@@ -705,7 +707,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
     if cmd.name.is_none() {
         // Just assignments
         for (key, val) in &cmd.assignments {
-            let expanded_val = expand_arg(val, &state.variables);
+            let expanded_val = expand_arg_in_state(val, state);
             if state.get_var(key).is_some_and(|var| var.readonly) {
                 eprintln!("cerf: {}: readonly variable", key);
                 return (ExecutionResult::KeepRunning, 1);
@@ -723,7 +725,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
         }
         // Handle residuals like redirects (e.g., VAR=val > file): a shell
         // still creates/truncates the target even with no command.
-        if let Err(e) = touch_redirect_files(&cmd.redirects, &state.variables) {
+        if let Err(e) = touch_redirect_files(&cmd.redirects, state) {
             eprintln!("{}", e);
             return (ExecutionResult::KeepRunning, 1);
         }
@@ -731,7 +733,7 @@ fn execute_simple(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResu
     }
 
     let raw_name = cmd.name.as_ref().unwrap();
-    let name = expand_vars(raw_name, &state.variables);
+    let name = expand_vars_in_state(raw_name, state);
 
     // Expand variables in the argument list BEFORE glob expansion.
     let expanded_args = expand_args(&cmd.args, state);
@@ -856,7 +858,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                 return execute_block_with_redirects(&pipeline, node, redirects, state);
             }
             if let crate::parser::CommandNode::Simple(cmd) = node {
-                let name = expand_vars(cmd.name.as_deref().unwrap_or(""), &state.variables);
+                let name = expand_vars_in_state(cmd.name.as_deref().unwrap_or(""), state);
                 if let Some(body) = state.functions.get(&name).cloned() {
                     let args = expand_globs(&expand_args(&cmd.args, state));
                     let script = function_call_script(&name, &body, &args);
@@ -938,7 +940,7 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
 
         let (name, func_body) = match cmd {
             crate::parser::CommandNode::Simple(s) => {
-                let name = expand_vars(s.name.as_deref().unwrap_or(""), &state.variables);
+                let name = expand_vars_in_state(s.name.as_deref().unwrap_or(""), state);
                 let body = state.functions.get(&name).cloned();
                 (name, body)
             }
@@ -1400,7 +1402,7 @@ fn execute_node(
             (ExecutionResult::KeepRunning, final_code)
         }
         crate::parser::CommandNode::Simple(cmd) => {
-            let name = expand_vars(cmd.name.as_deref().unwrap_or(""), &state.variables);
+            let name = expand_vars_in_state(cmd.name.as_deref().unwrap_or(""), state);
             if let Some(func_body) = state.functions.get(&name).cloned() {
                 // Function arguments become the positional parameters for
                 // the duration of the call, and prefix assignments apply.
@@ -1417,7 +1419,9 @@ fn execute_node(
 
                 let saved_positional = state.positional_args.clone();
                 state.set_positional_parameters(&args);
+                state.scopes.push(std::collections::HashMap::new());
                 let (res, code) = execute_list(func_body, state);
+                state.scopes.pop();
                 state.set_positional_parameters(&saved_positional);
                 restore_scoped_assignments(state, saved_assignments);
 

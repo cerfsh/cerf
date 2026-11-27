@@ -1100,3 +1100,30 @@ fn malformed_invocations_report_usage_errors() {
     assert!(version.status.success());
     assert!(String::from_utf8_lossy(&version.stdout).starts_with('v'));
 }
+
+#[test]
+fn local_variables_stay_inside_functions() {
+    let output = cerf()
+        .args([
+            "-c",
+            "func f { local x=1; io.echo \"in:$x\" }; f; io.echo \"out:${x}\"",
+        ])
+        .output()
+        .expect("run cerf");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "in:1\nout:\n");
+}
+
+#[test]
+fn local_outside_a_function_is_an_error() {
+    let output = cerf()
+        .args(["-c", "local x=1"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("can only be used in a function"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

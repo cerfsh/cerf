@@ -260,11 +260,16 @@ impl ShellState {
     }
 
     /// Set a variable strictly in the current local scope (for `env.local`).
-    pub fn set_local_var(&mut self, name: &str, value: Variable) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), value);
-        } else {
-            self.variables.insert(name.to_string(), value);
+    ///
+    /// Returns `false` when no scope is active, so `local` can reject use
+    /// outside a function instead of silently writing a global.
+    pub fn set_local_var(&mut self, name: &str, value: Variable) -> bool {
+        match self.scopes.last_mut() {
+            Some(scope) => {
+                scope.insert(name.to_string(), value);
+                true
+            }
+            None => false,
         }
     }
 
