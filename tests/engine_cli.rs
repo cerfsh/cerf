@@ -1214,3 +1214,23 @@ fn type_exits_nonzero_for_missing_names() {
         .expect("run cerf");
     assert_eq!(mixed.status.code(), Some(1));
 }
+
+#[test]
+fn help_exits_zero_when_help_was_printed() {
+    let builtin = cerf()
+        .args(["-c", "help io.echo"])
+        .output()
+        .expect("run cerf");
+    assert!(builtin.status.success(), "status: {:?}", builtin.status);
+
+    let missing = cerf()
+        .args(["-c", "help cerf-definitely-missing-command"])
+        .output()
+        .expect("run cerf");
+    assert_eq!(missing.status.code(), Some(127));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no help topics match"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}

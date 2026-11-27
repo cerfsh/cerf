@@ -42,40 +42,45 @@ pub fn help_runner(args: &[String], _state: &mut ShellState) -> (ExecutionResult
                 println!("{}", cmd.usage);
             } else {
                 // OS Fallback
-                #[cfg(unix)]
-                {
-                    if find_executable("man").is_some() {
-                        let mut command = Command::new("man");
-                        command.arg(arg);
-                        match command.status() {
-                            Ok(status) if status.success() => {}
-                            _ => {
+                let shown = {
+                    #[cfg(unix)]
+                    {
+                        if find_executable("man").is_some() {
+                            let mut command = Command::new("man");
+                            command.arg(arg);
+                            match command.status() {
+                                Ok(status) if status.success() => true,
                                 // Fallback to `<cmd> --help` if `man` fails
-                                try_help_flag(arg);
+                                _ => try_help_flag(arg),
                             }
+                        } else {
+                            try_help_flag(arg)
                         }
-                    } else {
-                        try_help_flag(arg);
                     }
-                }
 
-                #[cfg(windows)]
-                {
-                    try_help_flag(arg);
+                    #[cfg(windows)]
+                    {
+                        try_help_flag(arg)
+                    }
+                };
+                if !shown {
+                    exit_code = 127;
                 }
-                exit_code = 127; // Will be overwritten if successful, or kept if not a known builtin/command
             }
         }
     }
     (ExecutionResult::KeepRunning, exit_code)
 }
 
-fn try_help_flag(cmd_name: &str) {
+/// Try `<cmd> --help`. Returns true when a help command was actually run.
+fn try_help_flag(cmd_name: &str) -> bool {
     if find_executable(cmd_name).is_some() {
         let mut command = Command::new(cmd_name);
         command.arg("--help");
         let _ = command.status();
+        true
     } else {
         eprintln!("cerf: help: no help topics match `{}`", cmd_name);
+        false
     }
 }
