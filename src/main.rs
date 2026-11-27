@@ -13,7 +13,11 @@ use std::sync::atomic::AtomicUsize;
 pub static FG_JOB: AtomicUsize = AtomicUsize::new(0);
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
+    // Non-Unicode arguments are converted lossily instead of panicking, so
+    // the shell still starts when a caller passes arbitrary bytes.
+    let args: Vec<String> = env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
 
     if args.get(1).is_some_and(|arg| arg == "--internal-builtin") {
         let Some(name) = args.get(2) else {
@@ -114,6 +118,7 @@ fn main() -> ExitCode {
     }
 
     let mut input_buffer = String::new();
+    let mut shell_status = 0u8;
     loop {
         // Poll for any background jobs that have finished.
         engine::job_control::update_jobs(&mut state);
@@ -171,11 +176,12 @@ fn main() -> ExitCode {
                 let _ = rl.add_history_entry(&input);
                 state.add_history(&input);
 
-                if let Some(entries) = parser::parse_pipeline(&input, &state.variables)
-                    && let (engine::ExecutionResult::Exit, _) =
-                        engine::execute_list(entries, &mut state)
-                {
-                    break;
+                if let Some(entries) = parser::parse_pipeline(&input, &state.variables) {
+                    let (result, code) = engine::execute_list(entries, &mut state);
+                    if let engine::ExecutionResult::Exit = result {
+                        shell_status = code as u8;
+                        break;
+                    }
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -199,7 +205,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    ExitCode::SUCCESS
+    ExitCode::from(shell_status)
 }
 
 fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
@@ -212,12 +218,16 @@ fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
     if let Some(path) = env::var_os(engine::state::SNAPSHOT_ENV) {
         // SAFETY: called before this process starts any threads.
         unsafe { env::remove_var(engine::state::SNAPSHOT_ENV) };
+        let mut applied = false;
         match std::fs::read(&path) {
             Ok(bytes) => {
                 if let Some(assignments) = state.apply_snapshot(&bytes) {
+                    applied = true;
                     // Preserve the snapshot values of unexported variables
                     // when merging the inherited environment.
-                    for (key, value) in env::vars() {
+                    for (key, value) in env::vars_os() {
+                        let key = key.to_string_lossy().into_owned();
+                        let value = value.to_string_lossy().into_owned();
                         match state.variables.get_mut(&key) {
                             Some(var) if var.exported => {
                                 var.value = engine::state::VarValue::String(value);
@@ -239,12 +249,19 @@ fn run_internal_builtin(name: &str, args: &[String]) -> i32 {
                         var.exported = true;
                     }
                 } else {
-                    eprintln!("cerf: warning: ignoring malformed state snapshot");
+                    eprintln!(
+                        "cerf: warning: ignoring state snapshot not created by cerf: {}",
+                        path.display()
+                    );
                 }
             }
             Err(error) => eprintln!("cerf: warning: could not read state snapshot: {}", error),
         }
-        let _ = std::fs::remove_file(&path);
+        // Only remove a file whose contents proved it was our snapshot; an
+        // inherited or stale variable value must be left untouched.
+        if applied {
+            let _ = std::fs::remove_file(&path);
+        }
     }
     (command.run)(args, &mut state).1
 }

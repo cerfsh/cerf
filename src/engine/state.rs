@@ -123,6 +123,21 @@ impl Job {
 /// handed to an internal-builtin child process.
 pub const SNAPSHOT_ENV: &str = "CERF_INTERNAL_STATE";
 
+/// Magic prefix identifying a file written by [`ShellState::write_snapshot`].
+/// A file without it is never applied or removed, so an inherited or stale
+/// `CERF_INTERNAL_STATE` cannot destroy an unrelated file.
+const SNAPSHOT_MAGIC: &[u8] = b"cerf-snapshot\0";
+
+/// Is `name` a valid shell/environment identifier?
+///
+/// Environment APIs panic for empty names or names containing `=`, so every
+/// user-supplied name must be checked before it reaches `set_var`/`remove_var`.
+pub fn is_valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub struct ShellState {
     pub previous_dir: Option<PathBuf>,
     pub dir_stack: Vec<PathBuf>,
@@ -138,6 +153,8 @@ pub struct ShellState {
     pub positional_args: Vec<String>,
     /// Shell options enabled via `set -o` / `set -e` etc.
     pub set_options: HashSet<String>,
+    /// Exit status of the most recently executed command (for bare `exit`).
+    pub last_status: i32,
     /// Command history (persisted to `~/.cerf_history`).
     pub history: Vec<String>,
     /// True when this process was launched as an `--internal-builtin` child.
@@ -178,6 +195,7 @@ impl ShellState {
             functions: HashMap::new(),
             positional_args: Vec::new(),
             set_options: HashSet::new(),
+            last_status: 0,
             history: Vec::new(),
             internal_builtin: false,
             jobs: HashMap::new(),
@@ -260,6 +278,50 @@ impl ShellState {
         self.variables.get(name)
     }
 
+    /// Get a mutable variable reference, looking up through scopes.
+    pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Variable> {
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains_key(name) {
+                return scope.get_mut(name);
+            }
+        }
+        self.variables.get_mut(name)
+    }
+
+    /// Replace the positional parameters (`$1`, `$#`, `$@`, `$*`).
+    ///
+    /// Both [`ShellState::positional_args`] and the corresponding variables
+    /// are updated, so expansion, `shift`, and nested function calls all see
+    /// the same values.
+    pub fn set_positional_parameters(&mut self, params: &[String]) {
+        let mut idx = 1;
+        loop {
+            let key = idx.to_string();
+            if self.variables.remove(&key).is_none() {
+                break;
+            }
+            idx += 1;
+        }
+        self.variables.remove("#");
+        self.variables.remove("@");
+        self.variables.remove("*");
+
+        for (i, value) in params.iter().enumerate() {
+            self.variables
+                .insert((i + 1).to_string(), Variable::new_string(value.clone()));
+        }
+        let joined = params.join(" ");
+        self.variables.insert(
+            "#".to_string(),
+            Variable::new_string(params.len().to_string()),
+        );
+        self.variables
+            .insert("@".to_string(), Variable::new_string(joined.clone()));
+        self.variables
+            .insert("*".to_string(), Variable::new_string(joined));
+        self.positional_args = params.to_vec();
+    }
+
     /// Get a variable's string value.
     pub fn get_var_string(&self, name: &str) -> Option<String> {
         self.get_var(name).map(|v| v.value.as_string())
@@ -301,6 +363,7 @@ impl ShellState {
     /// start from the parent's launch-time state.
     fn snapshot(&self, assignments: &[(String, String)]) -> Vec<u8> {
         let mut out = Vec::new();
+        out.extend_from_slice(SNAPSHOT_MAGIC);
         out.extend_from_slice(&(self.variables.len() as u32).to_le_bytes());
         for (name, var) in &self.variables {
             let (values, is_array): (Vec<&String>, bool) = match &var.value {
@@ -344,7 +407,10 @@ impl ShellState {
     /// Restore variables and options and return the separate prefix assignments.
     /// Returns `None` for a malformed snapshot.
     pub fn apply_snapshot(&mut self, bytes: &[u8]) -> Option<Vec<(String, String)>> {
-        let mut pos = 0;
+        let mut pos = SNAPSHOT_MAGIC.len();
+        if !bytes.starts_with(SNAPSHOT_MAGIC) {
+            return None;
+        }
         let var_count = take_u32(bytes, &mut pos)?;
         let mut variables = HashMap::new();
         for _ in 0..var_count {
@@ -424,7 +490,16 @@ fn take_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
 
 /// Initialize shell variables from the OS environment and set defaults for missing ones.
 fn init_env_vars() -> HashMap<String, String> {
-    let mut vars: HashMap<String, String> = std::env::vars().collect();
+    // `std::env::vars()` panics on non-Unicode entries; convert lossily so the
+    // shell can start in an environment containing arbitrary bytes.
+    let mut vars: HashMap<String, String> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
 
     // Helper to get temp dir
     fn temp_dir(_vars: &HashMap<String, String>) -> String {
