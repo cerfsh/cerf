@@ -535,15 +535,35 @@ fn parse_loop_command(input: &str) -> IResult<&str, CommandNode> {
     Ok((rest, CommandNode::Loop { body, redirects }))
 }
 
+/// True when a keyword ends at `input`: at end of input or before a shell
+/// delimiter. Keeps commands such as `breakfast` from parsing as `break`.
+fn keyword_boundary(input: &str) -> bool {
+    input.chars().next().is_none_or(|c| {
+        c.is_whitespace() || matches!(c, ';' | '&' | '|' | '{' | '}' | '(' | ')' | '<' | '>')
+    })
+}
+
 /// Parse a `break` command.
 fn parse_break_command(input: &str) -> IResult<&str, CommandNode> {
     let (input, _) = nom::bytes::complete::tag("break")(input)?;
+    if !keyword_boundary(input) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     Ok((input, CommandNode::Break))
 }
 
 /// Parse a `continue` command.
 fn parse_continue_command(input: &str) -> IResult<&str, CommandNode> {
     let (input, _) = nom::bytes::complete::tag("continue")(input)?;
+    if !keyword_boundary(input) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     Ok((input, CommandNode::Continue))
 }
 
@@ -714,4 +734,38 @@ pub fn parse_command_list(input: &str) -> IResult<&str, Vec<CommandEntry>> {
     }
 
     Ok((rest, entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_node(input: &str) -> CommandNode {
+        let (rest, node) = parse_command_node(input).expect("parse command");
+        assert!(rest.trim().is_empty(), "unexpected remainder: {rest:?}");
+        node
+    }
+
+    fn parse_prefix(input: &str) -> (&str, CommandNode) {
+        parse_command_node(input).expect("parse command")
+    }
+
+    #[test]
+    fn break_and_continue_require_a_word_boundary() {
+        assert!(matches!(parse_node("break"), CommandNode::Break));
+        assert!(matches!(parse_node("continue"), CommandNode::Continue));
+        assert!(matches!(
+            parse_prefix("break;").1,
+            CommandNode::Break
+        ));
+
+        match parse_node("breakfast") {
+            CommandNode::Simple(cmd) => assert_eq!(cmd.name.as_deref(), Some("breakfast")),
+            _ => panic!("expected a simple command"),
+        }
+        match parse_node("continue.sh") {
+            CommandNode::Simple(cmd) => assert_eq!(cmd.name.as_deref(), Some("continue.sh")),
+            _ => panic!("expected a simple command"),
+        }
+    }
 }
