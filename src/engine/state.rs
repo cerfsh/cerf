@@ -25,7 +25,7 @@ pub struct ProcessInfo {
     pub state: JobState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Job {
     pub id: usize,
     #[cfg(unix)]
@@ -35,6 +35,24 @@ pub struct Job {
     pub command: String,
     pub processes: Vec<ProcessInfo>,
     pub reported_done: bool,
+}
+
+/// Close a Windows job-object handle. Zero means "no handle".
+#[cfg(windows)]
+pub fn close_job_handle(handle: isize) {
+    if handle != 0 {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle as _);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        close_job_handle(self.job_handle);
+        self.job_handle = 0;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

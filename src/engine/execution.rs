@@ -1147,6 +1147,8 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
                 for mut child in children {
                     let _ = child.kill();
                 }
+                #[cfg(windows)]
+                crate::engine::state::close_job_handle(job_handle);
                 return (ExecutionResult::KeepRunning, 127);
             }
         }
@@ -1155,6 +1157,8 @@ pub fn execute(pipeline: &Pipeline, state: &mut ShellState) -> (ExecutionResult,
     if processes.is_empty() {
         // Every pipeline element was skipped (for example assignment-only):
         // there is no process to track and never a pgid 0 job.
+        #[cfg(windows)]
+        crate::engine::state::close_job_handle(job_handle);
         return (ExecutionResult::KeepRunning, 0);
     }
 
