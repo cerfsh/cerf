@@ -14,6 +14,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-27
+
+The correctness follow-up: redirects, quoting, positional parameters, and job
+control now behave the way the shell language describes, and the builtins no
+longer panic on edge-case input.
+
+### Changed
+
+- The Windows installer places `cerf` in `$HOME/.local/bin` instead of
+  `C:/bin/CodeTease`.
+
 ### Fixed
 
 - Inline `#` comments are stripped outside quotes at a word boundary, so
@@ -231,6 +242,7 @@ tracked in detail.
   brace-style control flow, functions, variables, aliases, globbing, history,
   job control, and Windows/Unix support.
 
-[Unreleased]: https://github.com/cerfsh/cerf/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/cerfsh/cerf/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/cerfsh/cerf/releases/tag/v0.3.2
 [0.3.1]: https://github.com/cerfsh/cerf/releases/tag/v0.3.1
 [0.3.0]: https://github.com/cerfsh/cerf/releases/tag/v0.3.0
