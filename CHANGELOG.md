@@ -75,6 +75,8 @@ longer panic on edge-case input.
 - `--internal-builtin` only removes a state snapshot that carries Cerf's magic
   header, so an inherited `CERF_INTERNAL_STATE` can no longer delete an
   unrelated file (#67).
+- The inline-comment regression test uses a temporary file instead of
+  `/etc/passwd`, so the test suite passes on Windows.
 
 ## [0.3.1] - 2026-11-25
 
